@@ -1672,6 +1672,7 @@ void EmitProgram(SpirvEmitterState& state) {
         for (std::uint32_t pixel = 3u; pixel-- > 0u;) selected = Select(state, TypeU32(state), EmitCompareU32Constant(state, spv::OpIEqual, quad, pixel), word(pixel), selected);
         state.sampleOrderWord = selected;
     }
+    InitializePackedBlend(state);
     if (AlphaToCoverage(state)) StoreCoverage(state, ConstantI32(state, -1));
     EmitBdaAnchors(state);
     if (state.pointSizeVariable != 0u && state.inputInfo.vertex != nullptr && state.inputInfo.vertex->pointList) {
@@ -2020,6 +2021,11 @@ void EmitSetAttribute(SpirvValueEmitContext& ctx, const IrValue& inst) {
             const auto mapped = state.module.AllocateId();
             state.module.AddFunction(spv::OpCompositeConstruct, vectorType, mapped, components[0], components[1], components[2], components[3]);
             value = mapped;
+            if (state.packedBlendColor != 0 && exp.index == state.inputInfo.pixel->packedBlend.target) {
+                if ((MrtOutputMode(state, exp) != 4u && MrtOutputMode(state, exp) != 9u) || (exp.en & 15u) != 15u) throw std::runtime_error("packed float blending requires a complete floating-point RGBA export");
+                state.module.AddFunction(spv::OpStore, state.packedBlendColor, value);
+                state.module.AddFunction(spv::OpStore, state.packedBlendWritten, ConstantBool(state, true));
+            }
             if (exp.index == 0u && !uintOutput && AlphaToCoverage(state)) StoreAlphaCoverage(state, value);
             const auto mode = MrtOutputMode(state, exp);
             if (PixelInfo(state).mergeMask != 0u && exp.index == PixelInfo(state).mergeTarget) {

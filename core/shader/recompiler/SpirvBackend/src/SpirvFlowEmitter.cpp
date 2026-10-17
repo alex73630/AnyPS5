@@ -91,6 +91,7 @@ void EmitReturnTerminator(SpirvValueEmitContext& ctx) {
         });
     }
     FlushColorTargetMerge(state);
+    CommitPackedBlend(state);
     if (OrderedPixelShader(state)) {
         state.module.AddFunction(spv::OpEndInvocationInterlockEXT);
     }

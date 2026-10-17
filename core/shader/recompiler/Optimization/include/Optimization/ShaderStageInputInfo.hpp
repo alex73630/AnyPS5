@@ -192,6 +192,7 @@ struct ShaderPixelInputInfo {
     bool psExecuteOnNoop = false;
     ConservativeZExport psConservativeZExport = ConservativeZExport::AnyZ;
     bool psOrderedPixelShader = false;
+    PackedFloatBlend packedBlend{};
     bool psAlphaToCoverage = false;
     bool psDitheredAlphaToCoverage = false;
     std::uint8_t quadPixelMask = 0xf;

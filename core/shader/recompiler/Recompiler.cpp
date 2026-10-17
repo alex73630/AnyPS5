@@ -588,7 +588,8 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     bool registration = request.target.registrationModules && (request.shader.stage == ShaderStage::Vertex || request.shader.stage == ShaderStage::Fragment);
     program.Metadata().bindingLayoutComplete = false;
     const bool stencilReplay = request.shader.stage == ShaderStage::Fragment && std::ranges::any_of(program.Info().outputs, [](const StageOutput& output) { return output.kind == StageOutputKind::StencilRef; }) && std::ranges::find(request.target.supportedCapabilities, static_cast<std::uint32_t>(spv::CapabilityStencilExportEXT)) == request.target.supportedCapabilities.end();
-    auto bindings = bindingAllocator.Allocate(program, request.layout, registration, stencilReplay);
+    const bool packedBlend = request.context.pixel && request.context.pixel->packedBlend.control != 0;
+    auto bindings = bindingAllocator.Allocate(program, request.layout, registration, stencilReplay, packedBlend);
 
     SpirvTargetOptions targetOptions {};
     targetOptions.vulkanVersion = request.target.vulkanVersion;
@@ -661,7 +662,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     if (registration && result.spirv.size() > request.target.registrationWordLimit) {
         registration = false;
         program.Metadata().bindingLayoutComplete = false;
-        bindings = bindingAllocator.Allocate(program, request.layout, false, stencilReplay);
+        bindings = bindingAllocator.Allocate(program, request.layout, false, stencilReplay, packedBlend);
         targetOptions.registrationModules = false;
         result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions, &emitted);
     }

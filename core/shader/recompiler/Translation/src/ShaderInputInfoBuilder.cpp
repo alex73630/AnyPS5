@@ -158,8 +158,11 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         pixelStorage.psEarlyZ = pixel.earlyZ;
         pixelStorage.psExecuteOnNoop = pixel.executeOnNoop;
         pixelStorage.psConservativeZExport = pixel.conservativeZExport;
-        pixelStorage.psOrderedPixelShader = pixel.orderedPixelShader;
+        pixelStorage.psOrderedPixelShader = pixel.orderedPixelShader || pixel.packedBlend.control != 0;
+        pixelStorage.packedBlend = pixel.packedBlend;
+        if (pixel.packedBlend.control != 0 && (pixel.packedBlend.target >= 8u || pixel.pixelKillEnable || pixel.depthExportEnable || pixel.stencilRefExportEnable || pixel.sampleMaskExportEnable || pixel.alphaToCoverage || pixel.sampleShading || pixel.quadPixelMask != 0xfu || std::ranges::any_of(pixel.quadSampleMask, [](auto mask) { return mask != 0xffffu; }))) throw std::runtime_error("packed float blending requires single-sample coverage without depth or stencil exports");
         if (pixel.ditheredAlphaToCoverage && !pixel.alphaToCoverage) throw std::runtime_error("dithered alpha-to-coverage requires enabled coverage");
+        if (pixel.packedBlend.control != 0 && (pixel.targetExportPacking[pixel.packedBlend.target] != ColorExportPacking::Float11_11_10 || pixel.targetExportMapping[pixel.packedBlend.target] != 0xc6u || pixel.reversedBlend != 0 || pixel.dualSourceBlend)) throw std::runtime_error("packed float blending requires reversed RGB float packing without secondary exports");
         pixelStorage.psAlphaToCoverage = pixel.alphaToCoverage;
         pixelStorage.psDitheredAlphaToCoverage = pixel.ditheredAlphaToCoverage;
         pixelStorage.quadPixelMask = pixel.quadPixelMask;

@@ -210,6 +210,9 @@ private:
         append(key, value.executeOnNoop);
         append(key, value.conservativeZExport);
         append(key, value.orderedPixelShader);
+        append(key, value.packedBlend.control);
+        append(key, value.packedBlend.target);
+        for (const auto constant : value.packedBlend.constants) append(key, std::bit_cast<std::uint32_t>(constant));
         append(key, value.alphaToCoverage);
         append(key, value.stencilRefExportEnable);
         append(key, value.stencilOperationValueExport);

@@ -276,7 +276,11 @@ bool IsPixelParameterFlat(const ShaderPixelInputInfo& pixel, std::uint32_t input
 }
 
 void CollectPixelInputs(const IrProgram& program, const ShaderPixelInputInfo* pixel, ShaderInfo& info) {
-    if (pixel->HasPositionInput() || pixel->psDitheredAlphaToCoverage || pixel->QuadMasked() || pixel->SampleLocationsVary() || pixel->ReordersSamples()) {
+    if (pixel->packedBlend.control != 0) {
+        AddInput(info, StageInputKind::Layer, 0, 1, "gl_Layer");
+        info.layerExported = true;
+    }
+    if (pixel->HasPositionInput() || pixel->psDitheredAlphaToCoverage || pixel->QuadMasked() || pixel->SampleLocationsVary() || pixel->ReordersSamples() || pixel->packedBlend.control != 0) {
         AddInput(info, StageInputKind::FragCoord, 0, 4, "gl_FragCoord");
     }
     if (pixel->psFrontFace) {

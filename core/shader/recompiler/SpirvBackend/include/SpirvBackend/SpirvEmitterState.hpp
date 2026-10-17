@@ -232,6 +232,10 @@ struct SpirvEmitterState {
     std::uint32_t entryLabel = 0;
     std::uint32_t currentLabel = 0;
     const IrBlock* currentBlock = nullptr;
+    std::uint32_t packedBlendImageType = 0;
+    std::uint32_t packedBlendImage = 0;
+    std::uint32_t packedBlendColor = 0;
+    std::uint32_t packedBlendWritten = 0;
     std::uint32_t pixelValidMaskVariable = 0;
     std::uint32_t mergeWordVariable = 0;
     std::uint32_t mergePendingVariable = 0;
