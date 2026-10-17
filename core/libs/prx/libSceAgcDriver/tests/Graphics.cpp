@@ -1868,6 +1868,16 @@ void DisabledColorTests() {
     Require(thirdSlice.depth && thirdSlice.depth->firstSlice == 3 && thirdSlice.depth->address == depthOnly.depth->address + 3u * AgcDriver::Graphics::DepthSliceBytes(depthOnly.depth->extent, 4u), "a depth view of slice 3 lost its slice or its Z offset");
     queue.context[0x002] = 1u << 26u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "on a surface without mips");
+    const auto beforeLayered = queue;
+    queue.context[0x002] = 1u | (3u << 13u);
+    queue.context[0x207] = 1u << 18u;
+    const auto layeredDepth = AgcDriver::Graphics::DecodeState(queue);
+    Require(!layeredDepth.hasColorTarget && layeredDepth.renderLayers == 3u && layeredDepth.layerExports == (1u << 18u) && layeredDepth.depth->firstSlice == 1u && layeredDepth.depth->address == depthOnly.depth->address + AgcDriver::Graphics::DepthSliceBytes(depthOnly.depth->extent, 4u), "a depth-only view did not route its three layers from slice one");
+    const auto colorQueue = makeState();
+    for (const auto offset : {0x202u, 0x31bu, 0x31cu, 0x31du, 0x3b0u, 0x3b8u, 0x390u, 0x318u, 0x1e0u}) queue.context[offset] = colorQueue.context.at(offset);
+    const auto singleColor = AgcDriver::Graphics::DecodeState(queue);
+    Require(singleColor.hasColorTarget && singleColor.renderLayers == 1u && singleColor.layerExports == 0u, "a single color slice with a broader depth view became layered");
+    queue = beforeLayered;
     queue.context[0x002] = 0;
     {
         using AgcDriver::Graphics::ComputeElementMipLayout;

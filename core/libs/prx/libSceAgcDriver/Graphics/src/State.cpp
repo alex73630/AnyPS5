@@ -1577,9 +1577,9 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         const bool layered = (read(cx, 0x207) & (1u << 18u)) != 0;
         Require(!layered || depth.lastSlice >= depth.firstSlice, "depth target has a reversed slice range");
         const auto layers = layered ? depth.lastSlice - depth.firstSlice + 1u : 1u;
-        if (result.hasColorTarget) Require(result.renderLayers == layers, "depth and color targets have different layer counts");
-        else result.renderLayers = layers;
-        if (layers > 1) {
+        if (!result.hasColorTarget) result.renderLayers = layers;
+        if (result.renderLayers > 1) {
+            Require(result.renderLayers == layers, "depth and color targets have different layer counts");
             Require(depth.samples == 1 && depth.address != 0, "layered multisample or stencil-only depth attachments are not implemented");
             result.layerExports = read(cx, 0x207) & (1u << 18u);
         }

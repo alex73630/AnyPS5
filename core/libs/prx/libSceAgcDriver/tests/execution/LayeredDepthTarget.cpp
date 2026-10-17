@@ -164,6 +164,7 @@ struct Pass {
     bool depthWrite;
     VkCompareOp compare;
     std::span<const std::uint32_t> pixelCode;
+    bool depthOnly = false;
 };
 
 void Draw(AgcDriver::VulkanDevice& device, std::uint64_t surface, const Pass& pass) {
@@ -194,9 +195,9 @@ void Draw(AgcDriver::VulkanDevice& device, std::uint64_t surface, const Pass& pa
     blend.colorWriteMask = 0xf;
     AgcDriver::Graphics::State state{};
     state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0u, waveSize, waveSize, std::nullopt, std::nullopt};
-    state.colors = {color};
+    if (!pass.depthOnly) state.colors = {color};
     state.color = color;
-    state.hasColorTarget = true;
+    state.hasColorTarget = !pass.depthOnly;
     state.renderExtent = {Side, Side};
     state.renderLayers = pass.layers;
     state.layerExports = pass.layers == 1 ? 0u : 1u << 18u;
@@ -212,7 +213,7 @@ void Draw(AgcDriver::VulkanDevice& device, std::uint64_t surface, const Pass& pa
     state.scissor = {{0, 0}, {Side, Side}};
     state.cullMode = VK_CULL_MODE_NONE;
     state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    state.blends = {blend};
+    if (!pass.depthOnly) state.blends = {blend};
     state.blend = blend;
     state.blendConstants = {};
 
@@ -349,6 +350,12 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels) {
         LoadLayer(device, DepthAddress, slice);
         for (std::uint32_t x = 0; x < Threads; ++x) Require(Output[x] == std::bit_cast<std::uint32_t>(depths[slice]), "depth slice " + std::to_string(slice) + " read as a layer of a 2D array texture after the six-layer draw: texel (" + std::to_string(x) + ", 0) is " + std::to_string(std::bit_cast<float>(Output[x])) + ", expected " + std::to_string(depths[slice]));
     }
+    const std::array<float, 3> depthOnly{0.25f, 0.5f, 0.75f};
+    Quads(3u, false, depthOnly);
+    Draw(device, surface, {1u, 3u, true, true, VK_COMPARE_OP_ALWAYS, FillPixelCode, true});
+    TestDepth(device, surface, 0, Layers);
+    const std::array<std::uint32_t, Layers> afterDepthOnly{2u, 8u, 16u, 24u, 10u, 12u};
+    for (std::uint32_t slice = 0; slice < Layers; ++slice) Expect(device, surface, slice, afterDepthOnly[slice], "a layered depth-only draw starting at slice one");
     AgcDriver::Graphics::StorageTexture::FlushPending(surface, SurfaceBytes, nullptr, "test");
     device.WaitIdle();
 }
