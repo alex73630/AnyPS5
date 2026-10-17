@@ -2611,8 +2611,11 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
             Require(!imageRead && !resources->ReadsImage(target.resident.get()) && !resources->ReadsOverlap(target.color.address, static_cast<std::size_t>(target.color.bytes)) && !inputOverlaps(target.color.address, target.color.bytes), "stencil replay refuses attachment feedback reads");
         }
         if (state.depth) {
-            const auto bytes = static_cast<std::size_t>(state.depth->extent.width) * state.depth->extent.height * 4u;
-            Require(!resources->ReadsOverlap(state.depth->address, bytes) && !resources->ReadsOverlap(state.depth->stencilAddress, bytes) && !inputOverlaps(state.depth->address, bytes) && !inputOverlaps(state.depth->stencilAddress, bytes), "stencil replay refuses depth or stencil feedback reads");
+            const auto& depth = *state.depth;
+            const bool d16 = depth.format == VK_FORMAT_D16_UNORM || depth.format == VK_FORMAT_D16_UNORM_S8_UINT;
+            const auto depthBytes = DepthSliceBytes(depth.extent, d16 ? 2u : 4u) * state.renderLayers;
+            const auto stencilBytes = DepthSliceBytes(depth.extent, 1u) * state.renderLayers;
+            Require(!resources->ReadsOverlap(depth.address, depthBytes) && !resources->ReadsOverlap(depth.stencilAddress, stencilBytes) && !inputOverlaps(depth.address, depthBytes) && !inputOverlaps(depth.stencilAddress, stencilBytes), "stencil replay refuses depth or stencil feedback reads");
             for (const auto& shader : shaders) {
                 for (const auto& binding : shader.program->bindings) {
                     if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages && binding.role != ShaderRecompiler::DescriptorRole::ImageTable) continue;
