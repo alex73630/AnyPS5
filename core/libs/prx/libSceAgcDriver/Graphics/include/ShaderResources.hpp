@@ -667,6 +667,9 @@ private:
         std::size_t firstSampler = 0;
         std::size_t samplerCount = 0;
     };
+    std::unique_ptr<ColorTarget> packedBlendTarget;
+    std::shared_ptr<StorageTexture> packedBlendStorage;
+    VkImageView packedBlendView = VK_NULL_HANDLE;
     std::vector<DeferredImages> deferredImages;
     std::uint64_t storageBuffers = 0;
     bool updateAfterBind = false;

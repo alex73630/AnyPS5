@@ -186,6 +186,7 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     product->pixel.dualSourceBlend = product->state.dualSourceBlend;
     product->pixel.reversedBlend = product->state.reversedBlend;
     product->pixel.targetMerge = Graphics::ExportTargetMerge(product->state);
+    product->pixel.packedBlend = product->state.packedBlend;
     product->pixel.alphaToCoverage = product->state.alphaToCoverage;
     product->pixel.quadPixelMask = Graphics::QuadPixelMask(product->state);
     if (product->state.sampleLocationGrid) {

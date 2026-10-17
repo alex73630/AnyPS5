@@ -110,8 +110,8 @@ std::span<const std::uint32_t> Float32Program(std::array<float, 3> rgb) {
     return Program({std::bit_cast<std::uint32_t>(rgb[0]), std::bit_cast<std::uint32_t>(rgb[1]), std::bit_cast<std::uint32_t>(rgb[2]), std::bit_cast<std::uint32_t>(1.0f)}, false);
 }
 
-std::span<const std::uint32_t> Float16Program(std::array<float, 3> rgb) {
-    return Program({Half(rgb[0]) | (Half(rgb[1]) << 16u), Half(rgb[2]) | (Half(1.0f) << 16u), 0, 0}, true);
+std::span<const std::uint32_t> Float16Program(std::array<float, 3> rgb, float alpha = 1.0f) {
+    return Program({Half(rgb[0]) | (Half(rgb[1]) << 16u), Half(rgb[2]) | (Half(alpha) << 16u), 0, 0}, true);
 }
 
 struct Block {
@@ -186,7 +186,7 @@ AgcDriver::Graphics::ColorTarget DecodeTarget(const Block& block, std::uint32_t 
     return color;
 }
 
-void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget& color, std::uint32_t exportFormat, std::span<const std::uint32_t> pixelCode) {
+void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget& color, std::uint32_t exportFormat, std::span<const std::uint32_t> pixelCode, std::uint32_t blendControl = 0u) {
     const auto target = device.Target();
     constexpr std::uint32_t waveSize = 64;
     std::vector<std::uint32_t> vertexUserData(4, 0u);
@@ -221,6 +221,8 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarge
     state.blends = {blend};
     state.blend = blend;
     state.blendConstants = {};
+    state.packedBlend = {blendControl, 0u, {}};
+    if (blendControl != 0u) state.blend.colorWriteMask = state.blends[0].colorWriteMask = 0u;
 
     const auto codeAddress = reinterpret_cast<std::uintptr_t>(pixelCode.data());
     const AgcDriver::Registers context{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, exportFormat}};
@@ -242,11 +244,13 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarge
         const auto invocation = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, request);
         return invocation.Materialize(*invocation.Capture(runtime));
     };
+    fragment.context.pixel->packedBlend = state.packedBlend;
     const auto pixelResult = materialize(fragment);
     auto unpacked = fragment;
+    unpacked.context.pixel->packedBlend = {};
     unpacked.context.pixel->targetExportPacking.fill(ShaderRecompiler::ColorExportPacking::None);
     const auto plain = materialize(unpacked);
-    Require(pixelResult->variantId == ShaderRecompiler::GetPreparedArtifact(*handle).variantId && plain->variantId == pixelResult->variantId, "the draw did not use the registered pixel shader");
+    Require(plain->variantId == ShaderRecompiler::GetPreparedArtifact(*handle).variantId && (blendControl != 0u || plain->variantId == pixelResult->variantId), "the draw did not use the registered pixel shader");
     Require(plain->PipelineVariantId() != pixelResult->PipelineVariantId() && materialize(fragment)->PipelineVariantId() == pixelResult->PipelineVariantId(), "the 11_11_10 float packing did not key its own specialization");
     const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
         {ShaderStage::Vertex, &vertexResult, 0},
@@ -319,6 +323,15 @@ void TargetTests(AgcDriver::VulkanDevice& device, Block& block, std::uint32_t at
     const std::array<float, 3> halves{0.5f, 0.75f, 0.125f};
     Draw(device, color, Float16Export, Float16Program(halves));
     ExpectSurface(device, block, layout, before, Packed(halves, standardOrder), std::string("an FP16_ABGR export of ") + Describe(halves) + " into a " + kind + " 11_11_10 float target");
+    if (!standardOrder && mode == ColorTileMode::RenderTarget && TargetHasCapability(device.Target(), spv::CapabilityFragmentShaderPixelInterlockEXT)) {
+        before = ReadBack(device, block);
+        const std::array<float, 3> source{0.25f, 0.5f, 0.75f};
+        const auto program = Float16Program(source, 0.5f);
+        Draw(device, color, Float16Export, program, 0x65040504u);
+        ExpectSurface(device, block, layout, before, Packed({0.375f, 0.625f, 0.4375f}, standardOrder), std::string("a blended FP16_ABGR export into a ") + kind + " packed float target");
+        Draw(device, color, Float16Export, program);
+        ExpectSurface(device, block, layout, before, Packed(source, standardOrder), std::string("an unblended FP16_ABGR export after blending into a ") + kind + " packed float target");
+    }
 }
 
 }

@@ -1552,6 +1552,7 @@ const char* roleName(ShaderRecompiler::DescriptorRole role) {
         case ShaderRecompiler::DescriptorRole::SamplerTable: return "SamplerTable";
         case ShaderRecompiler::DescriptorRole::ImageTableMap: return "ImageTableMap";
         case ShaderRecompiler::DescriptorRole::ImageStorageTable: return "ImageStorageTable";
+        case ShaderRecompiler::DescriptorRole::PackedBlendTarget: return "PackedBlendTarget";
     }
     throw std::runtime_error("AGC graphics: unknown descriptor role");
 }
@@ -2024,6 +2025,14 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                     continue;
                 }
                 Require(occupied.insert(binding.binding).second, "duplicate shader binding");
+                if (binding.role == ShaderRecompiler::DescriptorRole::PackedBlendTarget) {
+                    Require(target != nullptr && !packedBlendTarget && shader.stage == ShaderRecompiler::ShaderStage::Fragment && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && binding.count == 1u && binding.binding == ShaderRecompiler::RuntimeAbi::PackedBlendTargetBinding, "invalid packed blend target binding");
+                    packedBlendTarget = std::make_unique<ColorTarget>(*target);
+                    ++stageResources;
+                    requireStageLimits();
+                    bindings.push_back({{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1u, flags, nullptr}, {}, {}, 0u, static_cast<std::int32_t>(binding.descriptorSet)});
+                    continue;
+                }
                 if (binding.role == ShaderRecompiler::DescriptorRole::SamplerTable) {
                     addSamplerTable(binding, flags, tableStage(shader));
                     continue;
@@ -2326,7 +2335,7 @@ DescribedSetLayouts DescribeSetLayouts(const Context& context, std::span<const C
                 tablesUpdateAfterBind |= context.samplerTableUpdateAfterBind;
                 continue;
             }
-            const bool image = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
+            const bool image = binding.role == ShaderRecompiler::DescriptorRole::PackedBlendTarget || binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
             const auto type = !image ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : binding.kind == ShaderRecompiler::DescriptorKind::StorageImage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : binding.kind == ShaderRecompiler::DescriptorKind::SampledImage ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
             if (type != VK_DESCRIPTOR_TYPE_SAMPLER) stageResources += binding.count;
             if (type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
@@ -2390,6 +2399,11 @@ void ShaderResources::buildComplete() {
         nextImageRecord = 0;
         Require(textures.size() == plannedSampledImages && storageTextures.size() == plannedStorageImages, "image lookups disagree with the descriptor plan");
         resolveImageTables();
+        if (packedBlendTarget) {
+            const auto& target = *packedBlendTarget;
+            packedBlendStorage = CachedStorageSurface(context, target.arrayLastSlice != 0 ? ArraySurfaceForTarget(target) : SurfaceForTarget(target));
+            packedBlendView = packedBlendStorage->PackedBlendView(target.mip, target.arraySlice, target.layers);
+        }
         timing.bindingsMs += phase(BuildPhase::Images);
         guestMemory.UploadFinish(usesBda);
         timing.uploadMs += phase(BuildPhase::Upload);
@@ -2470,6 +2484,13 @@ void ShaderResources::buildComplete() {
                 write.dstBinding = binding.layout.binding;
                 write.descriptorCount = binding.layout.descriptorCount;
                 write.descriptorType = binding.layout.descriptorType;
+                if (binding.layout.binding == ShaderRecompiler::RuntimeAbi::PackedBlendTargetBinding) {
+                    Require(packedBlendView != VK_NULL_HANDLE, "packed blend target has no storage view");
+                    write.pImageInfo = images.data() + images.size();
+                    images.push_back({VK_NULL_HANDLE, packedBlendView, VK_IMAGE_LAYOUT_GENERAL});
+                    writes.push_back(write);
+                    continue;
+                }
                 switch (binding.layout.descriptorType) {
                     case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
                         write.pBufferInfo = buffers.data() + buffers.size();
@@ -2627,7 +2648,7 @@ std::uint64_t ShaderResources::DepthGuardRefusals() {
 bool ShaderResources::NeverReusable(std::span<const CompiledShader> shaders) {
     const bool loopGuard = LoopGuardEnabled();
     return std::any_of(shaders.begin(), shaders.end(), [loopGuard](const CompiledShader& shader) {
-        return shader.program != nullptr && std::any_of(shader.program->bindings.begin(), shader.program->bindings.end(), [loopGuard](const ShaderRecompiler::DescriptorBinding& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || (loopGuard && binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer); });
+        return shader.program != nullptr && std::any_of(shader.program->bindings.begin(), shader.program->bindings.end(), [loopGuard](const ShaderRecompiler::DescriptorBinding& binding) { return binding.role == ShaderRecompiler::DescriptorRole::PackedBlendTarget || binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || (loopGuard && binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer); });
     });
 }
 
@@ -5857,6 +5878,7 @@ bool ShaderResources::ReadsOverlap(std::uint64_t address, std::size_t bytes) con
 
 std::vector<std::pair<VkImage, bool>> ShaderResources::StorageImages() const {
     std::vector<std::pair<VkImage, bool>> images;
+    if (packedBlendStorage) images.emplace_back(packedBlendStorage->Image(), true);
     for (std::size_t index = 0; index < storageTextures.size(); ++index) {
         if (storageTextures[index] != nullptr) images.emplace_back(storageTextures[index]->Image(), storageWritten[index]);
     }

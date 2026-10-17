@@ -1892,6 +1892,24 @@ VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, s
     return created;
 }
 
+VkImageView StorageTexture::PackedBlendView(std::uint32_t mip, std::uint32_t firstLayer, std::uint32_t layers) {
+    Require(storageFormat == VK_FORMAT_R32_UINT && descriptor.dimension != TextureDimension::k3D && mip < descriptor.mipCount && layers != 0 && static_cast<std::uint64_t>(firstLayer) + layers <= geometry.imageLayers, "packed blend view exceeds its R32_UINT array surface");
+    const auto key = std::tuple{mip, firstLayer, layers};
+    if (const auto found = packedBlendViews.find(key); found != packedBlendViews.end()) return found->second;
+    VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    usage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+    VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    info.pNext = &usage;
+    info.image = image;
+    info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    info.format = VK_FORMAT_R32_UINT;
+    info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1u, firstLayer, layers};
+    VkImageView view = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &info, nullptr, &view), "vkCreateImageView packed blend");
+    packedBlendViews.emplace(key, view);
+    return view;
+}
+
 VkImageView StorageTexture::AttachmentProxyView() {
     if (proxyView != VK_NULL_HANDLE) return proxyView;
     Require(storageFormat == VK_FORMAT_R8_UNORM && descriptor.dimension == TextureDimension::k2D && descriptor.mipCount == 1 && geometry.imageLayers == 1, "an RGBA8_SRGB attachment proxy is only modeled for a single-mip 2D R8 surface");
@@ -5938,6 +5956,8 @@ void StorageTexture::release() noexcept {
     elementLayerViews.clear();
     for (const auto& [format, attachment] : attachmentViews) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, attachment, nullptr);
     attachmentViews.clear();
+    for (const auto& [key, view] : packedBlendViews) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
+    packedBlendViews.clear();
     if (proxyView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, proxyView, nullptr);
     if (proxyImage) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, proxyImage, nullptr);
     if (proxyMemory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, proxyMemory, nullptr);

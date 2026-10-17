@@ -121,6 +121,7 @@ struct State {
     bool quadList = false;
     bool dualSourceBlend = false;
     std::uint32_t reversedBlend = 0;
+    ShaderRecompiler::PackedFloatBlend packedBlend{};
     VkExtent2D renderExtent;
     std::uint32_t renderLayers = 1;
     std::uint32_t layerExports = 0;
