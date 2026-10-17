@@ -68,7 +68,7 @@ bool usesGds(const IrProgram& program) {
 
 }
 
-BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const BindingLayout& layout, bool registrationModules, bool stencilReplay) const {
+BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const BindingLayout& layout, bool registrationModules, bool stencilReplay, bool packedBlend) const {
     IrProgramMetadata& metadata = program.Metadata();
     if (!metadata.shaderInfoComplete || metadata.bindingLayoutComplete) {
         fail(metadata.shaderInfoComplete ? "shader binding layout failed: binding layout already allocated"
@@ -163,6 +163,7 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
         if (samplers.size() > RuntimeAbi::SamplerHeapCapacity) fail("shader sampler pairs exceed runtime heap capacity: " + std::to_string(samplers.size() / 2u) + " samplers");
         addBinding(next, DescriptorBindingKind::Samplers, std::move(samplers));
     }
+    if (packedBlend) addBinding(next, DescriptorBindingKind::PackedBlendTarget);
     if (usesGds(program)) {
         addBinding(next, DescriptorBindingKind::Gds);
     }

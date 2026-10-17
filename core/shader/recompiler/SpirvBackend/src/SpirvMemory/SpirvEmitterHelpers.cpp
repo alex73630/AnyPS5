@@ -481,6 +481,7 @@ void DefineDescriptors(SpirvEmitterState& state) {
             return state.module.Type(spv::OpTypeArray, type, length);
         };
         switch (binding.kind) {
+        case DescriptorBindingKind::PackedBlendTarget: break;
         case DescriptorBindingKind::Buffers:
             state.storageBufferVariable = Define(ArrayType(StorageBufferBlockType(state)), "buffers");
             if (state.requirements.coherentBufferAlias) state.storageBufferCoherentVariable = Define(ArrayType(StorageBufferBlockType(state)), "buffers_coherent");

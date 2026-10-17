@@ -44,7 +44,7 @@ DescriptorKind PhysicalKindFor(DescriptorBindingKind kind) {
     if (kind == DescriptorBindingKind::ImageTable) {
         return DescriptorKind::SampledImage;
     }
-    if (kind == DescriptorBindingKind::ImageStorageTable) {
+    if (kind == DescriptorBindingKind::PackedBlendTarget || kind == DescriptorBindingKind::ImageStorageTable) {
         return DescriptorKind::StorageImage;
     }
     const ImageResourceClass imageClass = ImageBindingResourceClass(kind);
@@ -58,6 +58,7 @@ DescriptorKind PhysicalKindFor(DescriptorBindingKind kind) {
 }
 
 DescriptorRole RoleFor(DescriptorBindingKind kind) {
+    if (kind == DescriptorBindingKind::PackedBlendTarget) return DescriptorRole::PackedBlendTarget;
     if (kind == DescriptorBindingKind::Buffers) {
         return DescriptorRole::GuestBuffers;
     }
@@ -658,6 +659,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         case DescriptorRole::ShaderData:
             physical.guestDescriptor = std::move(shaderData);
             break;
+        case DescriptorRole::PackedBlendTarget:
         case DescriptorRole::Gds:
         case DescriptorRole::BdaPagetable:
         case DescriptorRole::FaultBuffer:

@@ -175,6 +175,13 @@ struct TargetMerge {
     bool operator==(const TargetMerge&) const = default;
 };
 
+struct PackedFloatBlend {
+    bool operator==(const PackedFloatBlend&) const = default;
+    std::uint32_t control = 0;
+    std::uint32_t target = 0;
+    std::array<float, 4> constants{};
+};
+
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
@@ -217,6 +224,7 @@ struct ShaderPixelStageInfo {
     std::array<std::uint8_t, 32> sampleLocations{};
     TargetMerge targetMerge{};
     std::array<std::uint32_t, 4> sampleOrder{};
+    PackedFloatBlend packedBlend{};
 };
 
 struct ShaderVertexBufferResource {
@@ -485,7 +493,8 @@ enum class DescriptorRole {
     ImageTable,
     SamplerTable,
     ImageTableMap,
-    ImageStorageTable
+    ImageStorageTable,
+    PackedBlendTarget
 };
 
 struct DescriptorBinding {

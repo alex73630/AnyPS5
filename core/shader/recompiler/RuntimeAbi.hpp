@@ -9,7 +9,7 @@
 
 namespace ShaderRecompiler::RuntimeAbi {
 
-inline constexpr std::uint32_t Version = 17u;
+inline constexpr std::uint32_t Version = 18u;
 inline constexpr std::uint32_t DescriptorSet = 0u;
 inline constexpr std::uint32_t FragmentDescriptorSet = 1u;
 inline constexpr std::uint32_t StageCount = 4u;
@@ -31,7 +31,8 @@ enum class Binding : std::uint32_t {
     ImageTableMap = 64u,
     Count = 65u,
     ImageTable = 256u,
-    ImageStorageTable = 257u
+    ImageStorageTable = 257u,
+    PackedBlendTarget = 258u
 };
 
 enum class Stage : std::uint32_t { Main, Fragment, TessellationControl, TessellationEvaluation };
@@ -97,10 +98,12 @@ inline void RequireVersion(std::uint32_t version) {
     if (version != Version) throw std::runtime_error("Shader runtime ABI: incompatible version");
 }
 
-inline constexpr std::uint32_t ImageStorageTableBinding = StageCount * static_cast<std::uint32_t>(Binding::Count);
+inline constexpr std::uint32_t PackedBlendTargetBinding = StageCount * static_cast<std::uint32_t>(Binding::Count);
+inline constexpr std::uint32_t ImageStorageTableBinding = PackedBlendTargetBinding + 1u;
 inline constexpr std::uint32_t ImageTableBinding = ImageStorageTableBinding + 1u;
 
 inline std::uint32_t BindingNumber(Stage stage, Binding binding) {
+    if (binding == Binding::PackedBlendTarget) return PackedBlendTargetBinding;
     if (binding == Binding::ImageTable) return ImageTableBinding;
     if (binding == Binding::ImageStorageTable) return ImageStorageTableBinding;
     const auto group = static_cast<std::uint32_t>(stage);
@@ -111,7 +114,7 @@ inline std::uint32_t BindingNumber(Stage stage, Binding binding) {
 }
 
 static_assert(FirstImageBinding + ImageBindingCount == static_cast<std::uint32_t>(Binding::Samplers));
-static_assert(static_cast<std::uint32_t>(Binding::ImageTable) > static_cast<std::uint32_t>(Binding::Count) && ImageStorageTableBinding == 260u && ImageTableBinding == 261u);
+static_assert(static_cast<std::uint32_t>(Binding::ImageTable) > static_cast<std::uint32_t>(Binding::Count) && ImageStorageTableBinding == 261u && ImageTableBinding == 262u);
 
 }
 
