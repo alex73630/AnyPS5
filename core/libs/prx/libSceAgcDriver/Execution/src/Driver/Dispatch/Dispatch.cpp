@@ -354,9 +354,17 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             forgetAtCapture = GuestMemory::ForgetSerial();
             capture = [&] {
                 const SampledReadScope sampling(evidenceReads);
-                return CaptureInvocation(*shaderMemory, snapshot, codeOffset, request, invocation);
+                try {
+                    return CaptureInvocation(*shaderMemory, snapshot, codeOffset, request, invocation);
+                } catch (...) {
+                    request = invocation.Request();
+                    captured = shaderMemory->Regions();
+                    request.context.memory = captured;
+                    throw;
+                }
             }();
             captured = shaderMemory->Regions();
+            request = invocation.Request();
             request.context.memory = captured;
             if (traceCapSync()) traceCapture("dispatch-capture", address, submission.queue, captured, Graphics::Recorder::ThreadWaitedMs() - waitedBefore);
             captureMs += phaseTiming.Elapsed();

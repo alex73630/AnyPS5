@@ -57,7 +57,7 @@ std::string Driver::dumpRequest(std::uint64_t address, const ShaderRecompiler::R
     std::snprintf(hex, sizeof(hex), "%llx", static_cast<unsigned long long>(address));
     const std::string name = "shader_" + std::string(hex) + std::string(suffix) + ".req";
     std::lock_guard lock(dumpMutex);
-    if (!dumped.insert(name).second) return name;
+    if (suffix.empty() && !dumped.insert(name).second) return name;
     try {
         const auto text = ShaderRecompiler::RequestSerializer{}.Serialize(request);
         if (std::FILE* file = std::fopen(name.c_str(), "wb")) {
