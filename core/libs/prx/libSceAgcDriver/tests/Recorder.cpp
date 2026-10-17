@@ -9751,8 +9751,12 @@ void pipelineCacheTests(const Device& device, bool benchmark) {
         return CachedPipeline(context, state, input, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
     };
     VertexInputLayout input;
+    const auto buildsBefore = PipelineCompilation::Totals();
     const auto first = lookup(input);
+    const auto buildsAfter = PipelineCompilation::Totals();
+    Require(buildsAfter.ready > buildsBefore.ready && buildsAfter.active == buildsBefore.active, "pipeline build status did not record completed creation");
     Require(lookup(input) == first, "pipeline cache did not retain an identical key");
+    Require(PipelineCompilation::Totals().ready == buildsAfter.ready, "an in-memory pipeline hit was counted as another build");
     state.cullMode = VK_CULL_MODE_BACK_BIT;
     Require(lookup(input) != first, "pipeline cache ignored changed raster state");
     state.cullMode = 0;

@@ -7,6 +7,8 @@
 #include "SDL_vulkan.h"
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -79,6 +81,11 @@ void DisplayWindow::Destroy() noexcept {
     removeSubclass();
     SDL_DestroyWindow(window);
     window = nullptr;
+    fpsStart = 0;
+    titleUpdate = 0;
+    frameNum = 0;
+    fpsFrames = 0;
+    currentFps = 0;
 }
 
 SDL_Window* DisplayWindow::Handle() const {
@@ -104,25 +111,33 @@ void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) co
     height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
 }
 
-void DisplayWindow::UpdateTitle() {
+void DisplayWindow::UpdateTitle(bool presented) {
     require(window != nullptr, "window must exist before updating title");
     static const AppTitle title = GetAppTitle_nid_postfix();
-    static auto fpsStart = std::chrono::steady_clock::now();
-    static std::uint64_t fpsFrames = 0;
-    static double currentFps = 0.0;
-    const auto now = std::chrono::steady_clock::now();
-    frameNum++;
-    fpsFrames++;
-    const double elapsed = std::chrono::duration<double>(now - fpsStart).count();
-    if (elapsed >= 2.0) {
-        currentFps = static_cast<double>(fpsFrames) / elapsed;
+    static const bool shaderStatus = [] { const auto* value = std::getenv("APS5_SHADER_STATUS"); return value != nullptr && std::strcmp(value, "0") != 0; }();
+    const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    const auto frequency = std::uint64_t{1000000};
+    if (fpsStart == 0) fpsStart = now;
+    if (presented) {
+        ++frameNum;
+        ++fpsFrames;
+    }
+    if (now - fpsStart >= frequency * 2) {
+        currentFps = static_cast<double>(fpsFrames) * static_cast<double>(frequency) / static_cast<double>(now - fpsStart);
         fpsStart = now;
         fpsFrames = 0;
     }
-    char text[160];
-    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
+    if (titleUpdate != 0 && now - titleUpdate < frequency / 4) return;
+    titleUpdate = now;
+    char text[512];
+    if (shaderStatus) {
+        const auto status = AgcDriverShaderCompilationStatus_nid_no_patch();
+        std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu) | Shaders: %llu preparing, %llu queued | Vulkan: %llu ready, %llu active, %llu failed", title.value, currentFps, static_cast<unsigned long long>(frameNum), static_cast<unsigned long long>(status.preparing), static_cast<unsigned long long>(status.queued), static_cast<unsigned long long>(status.pipelinesReady), static_cast<unsigned long long>(status.pipelinesActive), static_cast<unsigned long long>(status.pipelinesFailed));
+    } else {
+        std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
+    }
     SDL_SetWindowTitle(window, text);
-    if (auto* telemetry = VideoOutTelemetry::Instance(); telemetry != nullptr && (frameNum == 1 || frameNum % 30 == 0)) telemetry->EmitPresent(frameNum, currentFps);
+    if (auto* telemetry = VideoOutTelemetry::Instance(); presented && telemetry != nullptr && (frameNum == 1 || frameNum % 30 == 0)) telemetry->EmitPresent(frameNum, currentFps);
 }
 
 void DisplayWindow::installSubclass() {

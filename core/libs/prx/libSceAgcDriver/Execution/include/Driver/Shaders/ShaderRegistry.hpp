@@ -33,6 +33,8 @@ class VulkanDevice;
 
 namespace AgcDriver::DriverDetail {
 
+void ShaderPreparationProgress(std::uint64_t& queued, std::uint64_t& active);
+
 struct ShaderSnapshot;
 
 class ShaderRegistry {
