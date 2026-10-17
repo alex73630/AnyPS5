@@ -1869,9 +1869,12 @@ VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, s
     Require(attachable, "storage image cannot be a color attachment");
     Require(mip < descriptor.mipCount, "attachment mip exceeds the storage image");
     const bool volume = descriptor.dimension == TextureDimension::k3D;
-    const bool array = !volume && descriptor.dimension == TextureDimension::k2DArray;
-    Require((depthSlice == 0 && layers == 1) || (volume && mip == 0 && layers != 0 && depthSlice + layers - 1u <= descriptor.depthOrLastArray) || (array && depthSlice == 0 && layers != 0), "attachment slice is outside the storage image");
-    Require((layer == 0 && layers == 1) || (volume && layer == 0) || (array && descriptor.baseArray + layer + layers - 1u <= descriptor.depthOrLastArray), "attachment layer is outside the storage image");
+    if (volume) {
+        Require(layer == 0 && layers != 0 && ((depthSlice == 0 && layers == 1) || (mip == 0 && static_cast<std::uint64_t>(depthSlice) + layers <= static_cast<std::uint64_t>(descriptor.depthOrLastArray) + 1u)), "attachment slice is outside the storage image");
+    } else {
+        Require(depthSlice == 0 && layers != 0 && ((layer == 0 && layers == 1) || descriptor.dimension == TextureDimension::k2DArray), "attachment slice is outside the storage image");
+        Require(static_cast<std::uint64_t>(descriptor.baseArray) + layer + layers <= static_cast<std::uint64_t>(descriptor.depthOrLastArray) + 1u, "attachment layer is outside the storage image");
+    }
     const auto found = attachmentViews.find({format, mip, depthSlice, layers, layer});
     if (found != attachmentViews.end()) return found->second;
     VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};

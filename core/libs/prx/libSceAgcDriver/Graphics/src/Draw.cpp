@@ -252,15 +252,8 @@ std::uint64_t DrawRenderPassKey(const Context& context, const State& state, std:
 
 namespace {
 
-GuestTextureResource ArraySurfaceForTarget(const ColorTarget& color) {
-    Require(color.arrayLastSlice != 0, "the color target is not a view of a 2D array");
-    auto surface = SurfaceForTarget(color);
-    surface.baseAddress = color.arrayAddress;
-    surface.width = color.surfaceExtent.width;
-    surface.height = color.surfaceExtent.height;
-    surface.depthOrLastArray = color.arrayLastSlice;
-    surface.dimension = TextureDimension::k2DArray;
-    return surface;
+std::uint32_t DirtyTargetSlice(const ColorTarget& color) {
+    return color.layers > 1 ? std::numeric_limits<std::uint32_t>::max() : color.arraySlice;
 }
 
 }
@@ -2596,13 +2589,14 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         targetViews.push_back(binding.target->View());
     }
     if (state.depth) {
-        targetViews.push_back(DepthSurfaceView(context, *state.depth, state.depthWrite));
+        targetViews.push_back(DepthSurfaceView(context, *state.depth, state.depthWrite, state.renderLayers));
         if (writesDepthTarget(state)) NoteDepthSurfaceWrite(context, *state.depth);
     }
     timer.phase(PhasePrepare);
     const bool recordDraws = RecordDraws();
     auto* recorder = prepared.recorder = Recorder::Active();
     bool recordable = recordDraws && recorder != nullptr && dumpLimit == 0 && std::all_of(targets.begin(), targets.end(), [](const TargetBinding& binding) { return binding.resident != nullptr || binding.multisampled; });
+    if (state.depth && state.renderLayers > 1) recordable = false;
     auto& resolved = prepared.resolved;
     resolved = resolveDrawResources(context, state, draw, shaders, snapshots, indexBytes, recordable, outcome, timer);
     auto& resources = resolved.resources;
@@ -3046,6 +3040,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
     if (recorded) {
         for (auto& object : reorderKept) recorder->Keep(std::move(object));
     }
+    if (state.depth && state.renderLayers > 1) StoreLayeredDepthSurface(context, commands, *state.depth, state.renderLayers);
     APS5_LOG_CHARS_OUT_DEBUG("Render pass ended");
     for (auto& binding : targets) {
         if (binding.proxied) {

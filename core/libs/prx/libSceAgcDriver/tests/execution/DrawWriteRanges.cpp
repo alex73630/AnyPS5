@@ -128,7 +128,34 @@ int main() {
         Require(Contains(exact, depth.stencilAddress, depth.stencilAddress + stencilBytes) && !Touches(exact, depth.stencilAddress + stencilBytes, depth.stencilAddress + stencilBytes + 1), "the exact stencil range is not DepthSliceBytes");
         for (const auto& [begin, end] : exact) Require(Contains(estimated, begin, end), "an exact range is not inside the estimates");
         std::printf("draw write ranges: color %zu bytes (estimate %llu), depth %llu, stencil %llu\n", color.bytes, static_cast<unsigned long long>(2 * color.bytes + 65536), static_cast<unsigned long long>(depthBytes), static_cast<unsigned long long>(stencilBytes));
-        std::puts("draw write ranges tests passed");
+        targets.renderLayers = 3;
+        for (const bool precise : {false, true}) {
+            const auto ranges = DrawWriteRanges(targets, none, precise);
+            Require(Contains(ranges, depth.address, depth.address + 3u * depthBytes), "a layered depth range misses later slices");
+            Require(Contains(ranges, depth.stencilAddress, depth.stencilAddress + 3u * stencilBytes), "a layered stencil range misses later slices");
+            if (precise) {
+                Require(!Touches(ranges, depth.address + 3u * depthBytes, depth.address + 3u * depthBytes + 1), "a layered depth range exceeds its slices");
+                Require(!Touches(ranges, depth.stencilAddress + 3u * stencilBytes, depth.stencilAddress + 3u * stencilBytes + 1), "a layered stencil range exceeds its slices");
+            }
+        }
+        color.format = VK_FORMAT_R8G8B8A8_UNORM;
+        color.surfaceExtent = color.extent;
+        color.dccAddress = 0;
+        color.cmaskAddress = 0;
+        color.arrayAddress = color.address;
+        color.arrayLastSlice = 3u;
+        color.arraySlice = 1u;
+        color.layers = 2u;
+        color.mipCount = 3u;
+        color.mip = 1u;
+        const auto arrayGeometry = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::ArraySurfaceForTarget(color));
+        color.surfaceAddress = color.arrayAddress + arrayGeometry.layerBytes;
+        color.address = color.surfaceAddress;
+        for (const bool exactArray : {false, true}) {
+            const auto ranges = DrawWriteRanges(targets, none, exactArray);
+            Require(Contains(ranges, color.arrayAddress, color.arrayAddress + arrayGeometry.guestBytes), "layered array write ranges omit part of the mipmapped owner");
+            Require(!Touches(ranges, color.arrayAddress + arrayGeometry.guestBytes, color.arrayAddress + arrayGeometry.guestBytes + 1u), "layered array write ranges extend past their owner");
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
