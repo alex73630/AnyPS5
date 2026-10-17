@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <array>
 #include <atomic>
@@ -231,7 +232,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VkResult created;
         {
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
-            created = context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &handle);
+            created = PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &handle));
         }
         lock.lock();
         Check(created, "vkCreateGraphicsPipelines library");
@@ -278,7 +279,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
     lock.unlock();
     {
         auto pipelineCacheLock = context.LockPipelineCacheForUse();
-        Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &pipeline), "vkCreateGraphicsPipelines link");
+        Check(PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &pipeline)), "vkCreateGraphicsPipelines link");
     }
     lock.lock();
     ++device.counters.linked;
@@ -307,7 +308,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             VkPipeline result = VK_NULL_HANDLE;
             const auto pipelineCreationResult = [&] {
                 auto pipelineCacheLock = cacheSynchronization != nullptr ? cacheSynchronization->LockForPipelineUse() : PipelineCacheSynchronization::PipelineUseLock{};
-                return createPipelines(slot->device, cache, 1, &create, nullptr, &result);
+                return PipelineCompilation{}.Complete(createPipelines(slot->device, cache, 1, &create, nullptr, &result));
             }();
             if (pipelineCreationResult != VK_SUCCESS) return;
             slot->handle.store(result);

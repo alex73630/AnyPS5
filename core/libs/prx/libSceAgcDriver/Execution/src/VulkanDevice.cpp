@@ -165,7 +165,7 @@ void CreateComputePipeline(VkDevice device, PFN_vkCreateComputePipelines create,
     if (subgroupSize != 0) info.stage.pNext = &subgroup;
     info.layout = layout;
     auto cacheLock = synchronization != nullptr ? synchronization->LockForPipelineUse() : Graphics::PipelineCacheSynchronization::PipelineUseLock{};
-    check(create(device, cache, 1, &info, nullptr, pipeline), "vkCreateComputePipelines");
+    check(Graphics::PipelineCompilation{}.Complete(create(device, cache, 1, &info, nullptr, pipeline)), "vkCreateComputePipelines");
     PerformanceCounters::CountPipeline();
 }
 

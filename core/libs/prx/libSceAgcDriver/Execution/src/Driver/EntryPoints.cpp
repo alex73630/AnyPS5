@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Screenshot.hpp"
 #include "prx/libkernel/Time/include/SleepWake.hpp"
 #include <algorithm>
+#include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include <mutex>
 
 namespace AgcDriver {
@@ -155,6 +156,16 @@ extern "C" void AgcDriverSubmitFlip_nid_postfix(const AgcDriver::FlipInfo& info)
 
 extern "C" std::uint64_t AgcDriverDispatchesAdoptedAhead_nid_postfix() {
     return AgcDriver::DriverDetail::Driver::Get().DispatchesAdoptedAhead();
+}
+
+extern "C" AgcDriver::ShaderCompilationStatus AgcDriverShaderCompilationStatus_nid_no_patch() {
+    AgcDriver::ShaderCompilationStatus status;
+    AgcDriver::DriverDetail::ShaderPreparationProgress(status.queued, status.preparing);
+    const auto pipelines = AgcDriver::Graphics::PipelineCompilation::Totals();
+    status.pipelinesActive = pipelines.active;
+    status.pipelinesReady = pipelines.ready;
+    status.pipelinesFailed = pipelines.failed;
+    return status;
 }
 
 extern "C" void AgcDriverRegisterVideoOutput_nid_postfix(std::uint32_t handle, const std::shared_ptr<AgcDriver::IVideoOutput>& output) {

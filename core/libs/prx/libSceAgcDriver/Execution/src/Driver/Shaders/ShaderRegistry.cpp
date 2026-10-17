@@ -1498,6 +1498,12 @@ public:
         return liveWorkers.load(std::memory_order_acquire);
     }
 
+    void Progress(std::uint64_t& queued, std::uint64_t& active) {
+        std::lock_guard lock(mutex);
+        queued += tasks.size();
+        active += running;
+    }
+
     static void CloseAll() {
         std::array<RegistrationPreparePool*, 2> pools{};
         {
@@ -1736,6 +1742,13 @@ void AwaitRegistrationPreparation() {
 
 void SubmitLibraryPrebuild(std::function<void()> task) {
     RegistrationPreparePool::Prebuild().Submit(std::move(task));
+}
+
+void ShaderPreparationProgress(std::uint64_t& queued, std::uint64_t& active) {
+    queued = 0;
+    active = 0;
+    if (auto* pool = RegistrationPreparePool::Existing()) pool->Progress(queued, active);
+    if (auto* pool = RegistrationPreparePool::ExistingPrebuild()) pool->Progress(queued, active);
 }
 
 void AwaitLibraryPrebuilds() {

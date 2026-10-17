@@ -5,6 +5,7 @@
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "tests/VideoOutTestEnvironment.hpp"
@@ -991,6 +992,43 @@ void testEop(bool overlay) {
     LibcRunShutdown_nid_postfix();
 }
 
+void testShaderStatus() {
+    check(SDL_setenv("APS5_SHADER_STATUS", "1", 1) == 0, "cannot enable shader status");
+    check(SDL_InitSubSystem(SDL_INIT_VIDEO) == 0, SDL_GetError());
+    {
+        DisplayWindow window;
+        window.Ensure(960, 540);
+        const auto before = AgcDriver::Graphics::PipelineCompilation::Totals();
+        {
+            AgcDriver::Graphics::PipelineCompilation pending;
+            window.UpdateTitle(false);
+            const std::string title = SDL_GetWindowTitle(window.Handle());
+            check(title.find("(0)") != std::string::npos && title.find("1 active") != std::string::npos, "idle title did not show active compilation without counting a frame");
+            pending.Complete(VK_SUCCESS);
+        }
+        SDL_Delay(275);
+        window.UpdateTitle(false);
+        const std::string ready = SDL_GetWindowTitle(window.Handle());
+        check(ready.find(std::to_string(before.ready + 1u) + " ready") != std::string::npos && ready.find("0 active") != std::string::npos && ready.find("(0)") != std::string::npos, "title did not refresh completed builds while no frames arrived");
+        window.UpdateTitle();
+        SDL_Delay(275);
+        window.UpdateTitle(false);
+        check(std::string(SDL_GetWindowTitle(window.Handle())).find("(1)") != std::string::npos, "status refresh changed the presented-frame count");
+        {
+            AgcDriver::Graphics::PipelineCompilation failed;
+            failed.Complete(VK_ERROR_UNKNOWN);
+        }
+        SDL_Delay(275);
+        window.UpdateTitle(false);
+        check(std::string(SDL_GetWindowTitle(window.Handle())).find(std::to_string(before.failed + 1u) + " failed") != std::string::npos, "failed pipeline creation was not displayed");
+        window.Destroy();
+        window.Ensure(960, 540);
+        window.UpdateTitle(false);
+        check(std::string(SDL_GetWindowTitle(window.Handle())).find("(0)") != std::string::npos, "reopened window retained its frame count");
+    }
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+}
+
 void testOneDevice() {
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
@@ -1103,6 +1141,7 @@ int main(int argc, char** argv) {
     VideoOutTestEnvironment environment;
     try {
         if (argc == 2 && std::string(argv[1]) == "decode") testDecode();
+        else if (argc == 2 && std::string(argv[1]) == "shader_status") testShaderStatus();
         else if (argc == 2 && std::string(argv[1]) == "controls") testControls();
         else if (argc == 2 && std::string(argv[1]) == "present") testPresentation();
         else if (argc == 2 && std::string(argv[1]) == "backtoback") testBackToBack();

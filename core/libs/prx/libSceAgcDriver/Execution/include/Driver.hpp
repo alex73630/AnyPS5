@@ -10,6 +10,14 @@
 
 namespace AgcDriver {
 
+struct ShaderCompilationStatus {
+    std::uint64_t preparing = 0;
+    std::uint64_t queued = 0;
+    std::uint64_t pipelinesActive = 0;
+    std::uint64_t pipelinesReady = 0;
+    std::uint64_t pipelinesFailed = 0;
+};
+
 void Submit(const Packet* packet, std::uint32_t queue);
 
 struct AwaitedWait {
@@ -33,6 +41,7 @@ extern "C" void AgcDriverSuspendPoint_nid_postfix();
 extern "C" void AgcDriverSerialProgress_nid_postfix(std::uint64_t* accepted, std::uint64_t* completed);
 extern "C" std::size_t AgcDriverAwaitedWaits_nid_postfix(AgcDriver::AwaitedWait* waits, std::size_t capacity);
 extern "C" std::uint64_t AgcDriverDispatchesAdoptedAhead_nid_postfix();
+extern "C" AgcDriver::ShaderCompilationStatus AgcDriverShaderCompilationStatus_nid_no_patch();
 extern "C" void AgcDriverRegisterShader_nid_postfix(const Shader* shader);
 extern "C" void AgcDriverResolveShaderAbi_nid_postfix(const Shader* shader, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive);
 extern "C" void AgcDriverResolveGraphicsStagesAbi_nid_postfix(std::span<const Shader* const> stages, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive);

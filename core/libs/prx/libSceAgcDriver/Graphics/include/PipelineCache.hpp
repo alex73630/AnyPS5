@@ -14,6 +14,25 @@
 
 namespace AgcDriver::Graphics {
 
+struct PipelineCompilationCounters {
+    std::uint64_t active = 0;
+    std::uint64_t ready = 0;
+    std::uint64_t failed = 0;
+};
+
+class PipelineCompilation {
+public:
+    PipelineCompilation();
+    ~PipelineCompilation();
+    PipelineCompilation(const PipelineCompilation&) = delete;
+    PipelineCompilation& operator=(const PipelineCompilation&) = delete;
+    VkResult Complete(VkResult result);
+    static PipelineCompilationCounters Totals();
+
+private:
+    bool succeeded = false;
+};
+
 class PipelineCache {
 public:
     static constexpr int SaveIntervalSeconds = 10;

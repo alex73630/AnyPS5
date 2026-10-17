@@ -19,6 +19,10 @@ namespace {
 constexpr std::uint32_t FileMagic = 0x50565041u;
 constexpr std::uint32_t FileFormat = 1;
 
+std::atomic<std::uint64_t> pipelineBuildsActive{0};
+std::atomic<std::uint64_t> pipelineBuildsReady{0};
+std::atomic<std::uint64_t> pipelineBuildsFailed{0};
+
 bool profiling() {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     return profile;
@@ -34,6 +38,24 @@ std::mutex& pathMutex(const std::filesystem::path& path) {
     return registry.paths[path];
 }
 
+}
+
+PipelineCompilation::PipelineCompilation() {
+    pipelineBuildsActive.fetch_add(1u, std::memory_order_relaxed);
+}
+
+PipelineCompilation::~PipelineCompilation() {
+    (succeeded ? pipelineBuildsReady : pipelineBuildsFailed).fetch_add(1u, std::memory_order_relaxed);
+    pipelineBuildsActive.fetch_sub(1u, std::memory_order_relaxed);
+}
+
+VkResult PipelineCompilation::Complete(VkResult result) {
+    succeeded = result == VK_SUCCESS;
+    return result;
+}
+
+PipelineCompilationCounters PipelineCompilation::Totals() {
+    return {pipelineBuildsActive.load(std::memory_order_relaxed), pipelineBuildsReady.load(std::memory_order_relaxed), pipelineBuildsFailed.load(std::memory_order_relaxed)};
 }
 
 PipelineCache::PipelineCache(const Context& context, const VkPhysicalDeviceProperties& properties, bool loadFromFile) : context(context), properties(properties) {
