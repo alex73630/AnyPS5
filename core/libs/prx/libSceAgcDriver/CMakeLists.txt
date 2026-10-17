@@ -3362,6 +3362,17 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+add_executable(agc_pipeline_warmup EXCLUDE_FROM_ALL tools/PipelineWarmup.cpp)
+target_include_directories(agc_pipeline_warmup PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+        ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR}
+)
+target_link_libraries(agc_pipeline_warmup PRIVATE libSceAgcDriver libc)
+set_target_properties(agc_pipeline_warmup PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_pipeline_warmup)
+
 add_executable(agc_compute_pipeline_replay EXCLUDE_FROM_ALL tools/ComputePipelineReplay.cpp)
 target_include_directories(agc_compute_pipeline_replay PRIVATE
         ${LIBS_INCLUDE_DIR}
