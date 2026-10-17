@@ -1523,7 +1523,6 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         result.renderLayers = result.color.layers;
         for (const auto& color : result.colors) Require(color.layers == result.renderLayers, "color targets with different layer counts are unsupported");
         if (result.renderLayers > 1) {
-            Require(!result.depth, "layered rendering with a depth target is unsupported");
             result.layerExports = read(cx, 0x207) & (1u << 18u);
         }
         if (result.depth) result.renderExtent = {std::min(result.renderExtent.width, result.depth->extent.width), std::min(result.renderExtent.height, result.depth->extent.height)};
@@ -1536,6 +1535,18 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         APS5_LOG_OUT_DEBUG("Render extent from screen=%ux%u", result.renderExtent.width, result.renderExtent.height);
     }
     result.quadSampleMask = decodeQuadSampleMask(cx, result.samples);
+    if (result.depth) {
+        const auto& depth = *result.depth;
+        const bool layered = (read(cx, 0x207) & (1u << 18u)) != 0;
+        Require(!layered || depth.lastSlice >= depth.firstSlice, "depth target has a reversed slice range");
+        const auto layers = layered ? depth.lastSlice - depth.firstSlice + 1u : 1u;
+        if (result.hasColorTarget) Require(result.renderLayers == layers, "depth and color targets have different layer counts");
+        else result.renderLayers = layers;
+        if (layers > 1) {
+            Require(depth.samples == 1 && depth.address != 0, "layered multisample or stencil-only depth attachments are not implemented");
+            result.layerExports = read(cx, 0x207) & (1u << 18u);
+        }
+    }
     result.pixelEarlyZ = !PixelProgramSkipped(queue) && PixelEarlyZ(read(cx, 0x203));
     result.pixelKill = !PixelProgramSkipped(queue) && (read(cx, 0x203) & 0x40u) != 0;
     if ((read(cx, 0x207) & LayerExports & ~result.layerExports & ~(1u << 21u)) != 0) {
@@ -1868,6 +1879,17 @@ GuestTextureResource SurfaceForTarget(const ColorTarget& color) {
     surface.dccAddress = color.dccAddress;
     surface.dccAlphaOnMsb = color.dccAlphaOnMsb;
     surface.dccPipeAligned = color.dccPipeAligned;
+    return surface;
+}
+
+GuestTextureResource ArraySurfaceForTarget(const ColorTarget& color) {
+    Require(color.arrayLastSlice != 0, "the color target is not a view of a 2D array");
+    auto surface = SurfaceForTarget(color);
+    surface.baseAddress = color.arrayAddress;
+    surface.width = color.surfaceExtent.width;
+    surface.height = color.surfaceExtent.height;
+    surface.depthOrLastArray = color.arrayLastSlice;
+    surface.dimension = TextureDimension::k2DArray;
     return surface;
 }
 

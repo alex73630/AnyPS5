@@ -208,6 +208,7 @@ ReversedBlend TranslateReversedBlend(std::uint32_t blendControl, std::uint8_t co
 std::size_t CmaskBytes(std::uint32_t width, std::uint32_t height);
 std::uint32_t ColorWriteMask(const Registers& context);
 GuestTextureResource SurfaceForTarget(const ColorTarget& color);
+GuestTextureResource ArraySurfaceForTarget(const ColorTarget& color);
 
 struct ColorMetadataPass {
     enum class Mode { EliminateFastClear, DccDecompress, Resolve, FmaskDecompress };

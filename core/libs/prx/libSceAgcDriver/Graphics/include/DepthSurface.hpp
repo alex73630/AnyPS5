@@ -17,7 +17,7 @@ namespace AgcDriver::Graphics {
 class Texture;
 class StorageTexture;
 
-VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, bool depthWritten = true);
+VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, bool depthWritten = true, std::uint32_t layers = 1);
 SampleOrderTarget DepthSurfaceOrderTarget(const Context& context, const DepthTarget& target);
 DepthSampleLocations DepthSurfaceSampleLocations(const Context& context, const DepthTarget& target);
 enum class DepthPlaneScope { Overlapped, Whole };
@@ -30,6 +30,7 @@ struct DepthPlaneStoreStatistics {
 };
 DepthPlaneStoreStatistics DepthPlaneStoreCounts();
 void NoteDepthSurfaceWrite(const Context& context, const DepthTarget& target);
+void StoreLayeredDepthSurface(const Context& context, VkCommandBuffer commands, const DepthTarget& target, std::uint32_t layers);
 bool SampleLocationsCompatibleDepth(const Context& context, VkFormat format, std::uint32_t samples);
 std::uint64_t DepthSurfacesSerial();
 std::uint64_t DepthSurfacesReleased();

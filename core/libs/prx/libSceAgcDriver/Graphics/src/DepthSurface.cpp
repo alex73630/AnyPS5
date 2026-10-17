@@ -249,7 +249,7 @@ std::optional<DepthPlaneOverwrite> decodeOverwrite(const StorageImageClear& clea
 
 class DepthSurface {
 public:
-    DepthSurface(const Context& context, const DepthTarget& target, DepthSamplingState sampling = {}) : context(context), target(target), hostFormat(HostDepthFormat(context, target.format)), sampling(std::move(sampling)) {
+    DepthSurface(const Context& context, const DepthTarget& target, DepthSamplingState sampling = {}, std::uint32_t layers = 1) : context(context), target(target), hostFormat(HostDepthFormat(context, target.format)), sampling(std::move(sampling)) {
         this->context.bufferPool.reset();
         VkFormatProperties properties{};
         context.formatProperties(context.physical, hostFormat, &properties);
@@ -264,7 +264,7 @@ public:
             info.format = hostFormat;
             info.extent = {target.extent.width, target.extent.height, 1};
             info.mipLevels = 1;
-            info.arrayLayers = 1;
+            info.arrayLayers = layers;
             info.samples = static_cast<VkSampleCountFlagBits>(target.samples);
             info.tiling = VK_IMAGE_TILING_OPTIMAL;
             info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -300,9 +300,9 @@ public:
             if (target.samples != 1u) owned = std::make_shared<OwnedImage>(this->context, image, memory);
             VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
             viewInfo.image = image;
-            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
             viewInfo.format = hostFormat;
-            viewInfo.subresourceRange = {aspects, 0, 1, 0, 1};
+            viewInfo.subresourceRange = {aspects, 0, 1, 0, layers};
             Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView depth");
             if (target.samples != 1u && sampleable && this->sampling.refusal.empty()) CheckCurrent();
             auto* recorder = RecorderFor(context);
@@ -1193,6 +1193,40 @@ struct DepthPlaneSlice {
     std::uint64_t written = 0;
 };
 
+struct LayeredDepthAttachment {
+    std::unique_ptr<DepthSurface> attachment;
+    std::vector<DepthSurface*> slices;
+
+    void Copy(const Context& context, VkCommandBuffer commands, bool store) {
+        constexpr VkAccessFlags access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, access, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        for (std::uint32_t layer = 0; layer < slices.size(); ++layer) {
+            auto& slice = *slices[layer];
+            for (const auto aspect : {VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_ASPECT_STENCIL_BIT}) {
+                if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT && slice.target.stencilAddress == 0) continue;
+                VkImageCopy copy{};
+                copy.srcSubresource = {static_cast<VkImageAspectFlags>(aspect), 0, store ? layer : 0u, 1};
+                copy.dstSubresource = {static_cast<VkImageAspectFlags>(aspect), 0, store ? 0u : layer, 1};
+                copy.extent = {slice.target.extent.width, slice.target.extent.height, 1};
+                context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage")(commands, store ? attachment->image : slice.image, VK_IMAGE_LAYOUT_GENERAL, store ? slice.image : attachment->image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+            }
+            if (store) slice.written = ++depthWrites;
+        }
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, access);
+    }
+};
+
+using LayeredDepthKey = std::tuple<VkDevice, std::uint32_t, std::uint32_t, VkFormat, std::uint32_t>;
+
+LayeredDepthKey layeredDepthKey(const Context& context, const DepthTarget& target, std::uint32_t layers) {
+    return {context.device, target.extent.width, target.extent.height, target.format, layers};
+}
+
+std::map<LayeredDepthKey, LayeredDepthAttachment>& layeredAttachments() {
+    static auto* attachments = new std::map<LayeredDepthKey, LayeredDepthAttachment>();
+    return *attachments;
+}
+
 class DepthPlaneCopy {
 public:
     DepthPlaneCopy(const Context& context, VkExtent2D extent, VkFormat format, std::uint32_t layers) : context(context), extent(extent), format(format), layers(layers), guestLayers(layers), surfaceLayers(layers) {
@@ -1980,7 +2014,39 @@ float HostDepthBiasConstant(const Context& context, VkFormat format, float const
     return constant * 256.0f;
 }
 
-VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, bool depthWritten) {
+VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, bool depthWritten, std::uint32_t layers) {
+    if (layers > 1) {
+        Require(target.samples == 1 && target.address != 0, "layered multisample or stencil-only depth attachments are not implemented");
+        Require(target.lastSlice >= target.firstSlice && target.lastSlice - target.firstSlice + 1u == layers, "depth and framebuffer layer counts differ");
+        Require(layers <= context.limits.maxImageArrayLayers && layers <= context.limits.maxFramebufferLayers, "layered depth target exceeds device limits");
+        std::lock_guard gpu(GuestMemory::GpuMutex());
+        std::vector<DepthSurface*> slices;
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            auto slice = target;
+            slice.firstSlice += layer;
+            slice.lastSlice = slice.firstSlice;
+            slice.address += layer * DepthSliceBytes(target.extent, d16 ? 2u : 4u);
+            if (slice.stencilAddress != 0) slice.stencilAddress += layer * DepthSliceBytes(target.extent, 1u);
+            if (slice.htileAddress != 0) slice.htileAddress += layer * HtileMetadataBytes(target.extent);
+            DepthSurfaceView(context, slice, depthWritten);
+            std::lock_guard lock(surfacesMutex());
+            auto* surface = depthSlice(context.device, slice.address, slice);
+            Require(surface != nullptr, "layered depth slice has no owner");
+            slices.push_back(surface);
+        }
+        std::lock_guard lock(surfacesMutex());
+        auto& layered = layeredAttachments()[layeredDepthKey(context, target, layers)];
+        if (layered.attachment == nullptr) layered.attachment = std::make_unique<DepthSurface>(context, target, DepthSamplingState{}, layers);
+        layered.slices = std::move(slices);
+        auto* recorder = RecorderFor(context);
+        std::unique_ptr<CommandBatch> batch;
+        if (recorder == nullptr) batch = std::make_unique<CommandBatch>(context);
+        layered.Copy(context, recorder != nullptr ? recorder->Commands() : batch->Handle(), false);
+        if (batch) batch->SubmitAndWait();
+        else Recorder::CountBarriers(Recorder::CommandClass::Copy, 2);
+        return layered.attachment->view;
+    }
     const auto htileCleared = RoutesToNativeDepthOwner(target) ? VkImageAspectFlags{0} : storeBackClearedHtile(context, target);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     settlePendingHtileClear(context, target.address);
@@ -2168,6 +2234,14 @@ DepthPlaneStoreStatistics DepthPlaneStoreCounts() {
     return statistics;
 }
 
+void StoreLayeredDepthSurface(const Context& context, VkCommandBuffer commands, const DepthTarget& target, std::uint32_t layers) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(surfacesMutex());
+    const auto found = layeredAttachments().find(layeredDepthKey(context, target, layers));
+    Require(found != layeredAttachments().end(), "layered depth attachment was not prepared");
+    found->second.Copy(context, commands, true);
+}
+
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads) {
     static constexpr std::array<std::uint32_t, 17> htileMaskKernel{0xd7460000u, 0x04010c06u, 0x34000084u, 0xdc388000u, 0x04020000u, 0xbf8c3f70u, 0xd7710008u, 0x00120805u, 0xd7710009u, 0x00120a05u, 0xd771000au, 0x00120c05u, 0xd771000bu, 0x00120e05u, 0xdc788000u, 0x00020800u, 0xbf810000u};
     if (userData.size() < 6 || numThreads[0] != 64 || numThreads[1] != 1 || numThreads[2] != 1) return 0;
@@ -2338,6 +2412,7 @@ void ClearDepthSurfaces(VkDevice device) {
     std::erase_if(surfaces(), [&](const auto& surface) { return surface->context.device == device; });
     std::erase_if(planeCopies(), [&](const auto& entry) { return std::get<0>(entry.first) == device; });
     std::erase_if(layeredStorages(), [&](const auto& entry) { return std::get<0>(entry.first) == device; });
+    std::erase_if(layeredAttachments(), [&](const auto& entry) { return std::get<0>(entry.first) == device; });
     std::unique_lock guardLock(depthGuardMutex());
     std::erase_if(depthGuards(), [&](const auto& range) { return range.device == device; });
     anyDepthGuard().store(!depthGuards().empty(), std::memory_order_release);

@@ -1,4 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -64,6 +66,14 @@ alignas(256) constexpr std::array<std::uint32_t, 106> GeometryCode{
 
 alignas(256) constexpr std::array<std::uint32_t, 4> PixelCode{
     0x7e0e02f2, 0xf800180f, 0x07070707, 0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 4> GrayPixelCode{
+    0x7e0e02f0, 0xf800180f, 0x07070707, 0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 4> BlackPixelCode{
+    0x7e0e0280, 0xf800180f, 0x07070707, 0xbf810000,
 };
 
 alignas(256) constexpr std::array<std::uint32_t, 6> LayerFieldPixelCode{
@@ -149,10 +159,10 @@ bool DeclaresLayer(std::span<const std::uint32_t> words) {
     return false;
 }
 
-void Run(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget& color, bool mesh, std::span<const std::uint32_t> pixelCode, bool layerField) {
+void Run(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget& color, bool mesh, std::span<const std::uint32_t> pixelCode, bool layerField, std::optional<AgcDriver::Graphics::DepthTarget> depth = std::nullopt, std::uint32_t vertices = Vertices.size(), std::uint32_t stencilReference = 7, VkCompareOp stencilCompare = VK_COMPARE_OP_ALWAYS) {
     const auto target = device.Target();
     const auto vertexBuffer = BufferDescriptor(Vertices.data(), sizeof(Vertex), static_cast<std::uint32_t>(Vertices.size()));
-    const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Vertices.size()), 0, 1, 0, false};
+    const AgcDriver::Pm4::DrawParameters draw{0, vertices, 0, 1, 0, false};
     ShaderRecompiler::ShaderVertexStageInfo vertexInfo{};
     vertexInfo.paClVsOutCntl = LayerExport;
     std::vector<std::uint32_t> userData(mesh ? 12u : 4u, 0u);
@@ -201,7 +211,16 @@ void Run(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget
     state.colors = {state.color};
     state.hasColorTarget = true;
     state.renderExtent = {Width, Height};
-    state.renderLayers = Layers;
+    state.renderLayers = color.layers;
+    state.depth = depth;
+    state.depthTest = depth.has_value();
+    state.depthWrite = depth.has_value();
+    state.depthCompare = VK_COMPARE_OP_LESS;
+    if (depth && depth->stencilAddress != 0) {
+        state.stencilTest = true;
+        state.stencilFront = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, stencilCompare, 0xffu, 0xffu, stencilReference};
+        state.stencilBack = state.stencilFront;
+    }
     state.layerExports = LayerExport;
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     state.viewport = {0, static_cast<float>(Height), static_cast<float>(Width), -static_cast<float>(Height), 0, 1};
@@ -240,7 +259,7 @@ std::uint64_t BlockOffset(const AgcDriver::Graphics::TextureSwizzleEquation& equ
 
 void Check(const std::byte* volume, const AgcDriver::Graphics::ColorTarget& color, const std::string& what, const std::array<std::uint8_t, Layers>& bands) {
     using namespace AgcDriver::Graphics;
-    const auto geometry = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::SurfaceForTarget(color));
+    const auto geometry = AgcDriver::Graphics::DescribeSurface(color.arrayLastSlice != 0 ? AgcDriver::Graphics::ArraySurfaceForTarget(color) : AgcDriver::Graphics::SurfaceForTarget(color));
     Require(geometry.thick == (color.tileMode == ColorTileMode::S4KBX), "unexpected volume addressing family");
     const auto tileMode = ColorTextureTileMode(color.tileMode);
     const auto thin = ThinBlockLayout(tileMode, 4);
@@ -291,6 +310,78 @@ int main(int argc, char** argv) {
         const auto thickColor = VolumeTarget(thickVolume.Data(), ColorTileMode::S4KBX);
         Run(*device, thickColor, false, PixelCode, false);
         Check(thickVolume.Data(), thickColor, "thick SW_4KB_S_X vertex draw and writeback", WhiteBands);
+        for (const bool declared : {false, true}) {
+            const GuestVolume arrayVolume(Slices * 65536u);
+            const auto address = reinterpret_cast<std::uintptr_t>(arrayVolume.Data());
+            AgcDriver::Registers registers;
+            registers[0x318] = static_cast<std::uint32_t>(address >> 8u);
+            registers[0x390] = static_cast<std::uint32_t>(address >> 40u);
+            registers[0x31b] = FirstSlice | ((Slices - 1u) << 13u);
+            registers[0x31c] = 0x28028u;
+            registers[0x31d] = 0u;
+            registers[0x3b0] = ((Width - 1u) << 14u) | (Height - 1u);
+            registers[0x3b8] = 0x4dc6c000u | (declared ? Slices - 1u : 0u);
+            registers[0x207] = LayerExport;
+            const auto arrayColor = AgcDriver::Graphics::DecodeColorBuffer(registers, 0);
+            Require(arrayColor.depth == 1u && arrayColor.arraySlice == FirstSlice && arrayColor.layers == Layers, "layered array view did not decode its slice range");
+            Run(*device, arrayColor, false, PixelCode, false);
+            Check(arrayVolume.Data(), arrayColor, declared ? "layered array draw" : "collapsed layered array draw", WhiteBands);
+            Run(*device, arrayColor, false, LayerFieldPixelCode, true);
+            Check(arrayVolume.Data(), arrayColor, "layered array ancillary index", LayerFieldBands);
+            if (declared) {
+                using namespace AgcDriver::Graphics;
+                const GuestVolume depthMemory(Slices * 65536u);
+                const GuestVolume stencilMemory(Slices * 65536u);
+                DepthTarget depth{};
+                depth.address = reinterpret_cast<std::uintptr_t>(depthMemory.Data()) + FirstSlice * 65536u;
+                depth.stencilAddress = reinterpret_cast<std::uintptr_t>(stencilMemory.Data()) + FirstSlice * 65536u;
+                depth.extent = {Width, Height};
+                depth.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+                depth.clearDepth = 1.0f;
+                depth.firstSlice = FirstSlice;
+                depth.lastSlice = Slices - 1u;
+                for (std::size_t i = 0; i < Vertices.size(); ++i) Vertices[i].position[2] = 0.25f * (i / 6u + 1u);
+                AgcDriver::GuestMemory::MarkWritten(reinterpret_cast<std::uintptr_t>(Vertices.data()), sizeof(Vertices));
+                Run(*device, arrayColor, false, PixelCode, false, depth);
+                Check(arrayVolume.Data(), arrayColor, "layered depth initial draw", WhiteBands);
+                for (auto& vertex : Vertices) vertex.position[2] = 0.5f;
+                AgcDriver::GuestMemory::MarkWritten(reinterpret_cast<std::uintptr_t>(Vertices.data()), sizeof(Vertices));
+                Run(*device, arrayColor, false, GrayPixelCode, false, depth);
+                Check(arrayVolume.Data(), arrayColor, "independent layered depth occlusion", {255, 255, 128});
+                for (std::uint32_t layer = 0; layer < Layers; ++layer) {
+                    BuildBands();
+                    if (layer != 0) std::copy_n(Vertices.begin() + layer * 6u, 6u, Vertices.begin());
+                    for (std::uint32_t vertex = 0; vertex < 6u; ++vertex) {
+                        Vertices[vertex].position[2] = 0.4f;
+                        Vertices[vertex].layer = 0;
+                    }
+                    AgcDriver::GuestMemory::MarkWritten(reinterpret_cast<std::uintptr_t>(Vertices.data()), sizeof(Vertices));
+                    auto colorSlice = arrayColor;
+                    colorSlice.layers = 1;
+                    colorSlice.arraySlice += layer;
+                    colorSlice.address += layer * 65536u;
+                    colorSlice.surfaceAddress += layer * 65536u;
+                    auto depthSlice = depth;
+                    depthSlice.address += layer * 65536u;
+                    depthSlice.stencilAddress += layer * 65536u;
+                    depthSlice.firstSlice += layer;
+                    depthSlice.lastSlice = depthSlice.firstSlice;
+                    Run(*device, colorSlice, false, BlackPixelCode, false, depthSlice, 6, 9);
+                }
+                Check(arrayVolume.Data(), arrayColor, "single slice reads layered depth writes", {255, 0, 0});
+                BuildBands();
+                for (auto& vertex : Vertices) vertex.position[2] = 0.45f;
+                AgcDriver::GuestMemory::MarkWritten(reinterpret_cast<std::uintptr_t>(Vertices.data()), sizeof(Vertices));
+                Run(*device, arrayColor, false, GrayPixelCode, false, depth);
+                Check(arrayVolume.Data(), arrayColor, "layered draw reads single slice depth writes", {255, 0, 0});
+                for (auto& vertex : Vertices) vertex.position[2] = 0.1f;
+                AgcDriver::GuestMemory::MarkWritten(reinterpret_cast<std::uintptr_t>(Vertices.data()), sizeof(Vertices));
+                Run(*device, arrayColor, false, GrayPixelCode, false, depth, Vertices.size(), 9, VK_COMPARE_OP_EQUAL);
+                Check(arrayVolume.Data(), arrayColor, "layered stencil preserves per-slice writes", {255, 128, 128});
+                BuildBands();
+                AgcDriver::GuestMemory::MarkWritten(reinterpret_cast<std::uintptr_t>(Vertices.data()), sizeof(Vertices));
+            }
+        }
         if (vertexOnly) std::puts("layered volume vertex draw tests passed");
         else if (target.mesh.has_value()) Run(*device, color, true, PixelCode, false);
         else std::puts("mesh case skipped, the device has no VK_EXT_mesh_shader");
