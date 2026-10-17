@@ -4972,6 +4972,7 @@ struct MockVulkan {
     std::map<VkPipelineLayout, VkPipelineLayoutCreateFlags> pipelineLayoutFlags;
     std::map<VkPipelineLayout, std::vector<VkPushConstantRange>> pipelineLayoutPushRanges;
     std::map<VkGraphicsPipelineLibraryFlagsEXT, VkPipelineLayout> libraryLayouts;
+    std::map<VkGraphicsPipelineLibraryFlagsEXT, VkPipelineCreateFlags> libraryCreateFlags;
     std::uint32_t pipelineCreateCount = 0;
     std::vector<std::array<std::uint32_t, 3>> pipelineSpecializations;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
@@ -5216,6 +5217,7 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineC
     const auto* library = static_cast<const VkGraphicsPipelineLibraryCreateInfoEXT*>(infos[0].pNext);
     Require(library != nullptr && library->sType == VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, "missing graphics pipeline library description");
     mock.libraryLayouts[library->flags] = infos[0].layout;
+    mock.libraryCreateFlags[library->flags] = infos[0].flags;
     *pipelines = makeHandle<VkPipeline>();
     ++mock.live;
     return VK_SUCCESS;
@@ -7937,10 +7939,13 @@ void sampleOrderTests() {
 
 void pipelineLibrarySetTests() {
     using namespace AgcDriver::Graphics;
-    for (const auto mask : {0u, 1u, 2u, 3u}) {
+    for (std::uint32_t scenario = 0; scenario < 8u; ++scenario) {
+        const auto mask = scenario & 3u;
+        const bool optimize = (scenario & 4u) != 0u;
         mock = MockVulkan{};
         auto context = mockContext();
         context.graphicsPipelineLibrary = true;
+        context.pipelineLinkTimeOptimization = optimize;
         context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
         State state{};
         ShaderRecompiler::RecompileResult vertex, fragment;
@@ -7959,6 +7964,10 @@ void pipelineLibrarySetTests() {
         PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), makeHandle<VkDescriptorSetLayout>(), true, mainKey, fragmentKey};
         const auto prebuild = [&] { Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "graphics pipeline library prebuild was skipped"); };
         prebuild();
+        for (const auto& [part, flags] : mock.libraryCreateFlags) {
+            const bool retained = (flags & VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT) != 0u;
+            Require(retained == (optimize && std::getenv("APS5_NO_PIPELINE_LTO") == nullptr), "pipeline library retained optimization data that cannot be used or discarded data needed for linking");
+        }
         for (const auto part : {VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT}) {
             const auto layout = mock.libraryLayouts.at(part);
             const auto expectedMask = part == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT ? mask : mask ^ 3u;

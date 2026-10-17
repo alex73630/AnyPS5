@@ -196,7 +196,8 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VkGraphicsPipelineLibraryCreateInfoEXT library{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, flags[part] == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT ? &rendering : &shaderRendering};
         library.flags = flags[part];
         VkGraphicsPipelineCreateInfo create{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &library};
-        create.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+        create.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+        if (optimize) create.flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
         create.pDynamicState = info.pDynamicState;
         create.layout = partLayouts[part];
         switch (flags[part]) {
