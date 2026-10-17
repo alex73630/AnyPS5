@@ -2598,7 +2598,6 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
     const bool recordDraws = RecordDraws();
     auto* recorder = prepared.recorder = Recorder::Active();
     bool recordable = recordDraws && recorder != nullptr && dumpLimit == 0 && std::all_of(targets.begin(), targets.end(), [](const TargetBinding& binding) { return binding.resident != nullptr || binding.multisampled; });
-    if (state.depth && state.renderLayers > 1) recordable = false;
     auto& resolved = prepared.resolved;
     resolved = resolveDrawResources(context, state, draw, shaders, snapshots, indexBytes, recordable, outcome, timer);
     auto& resources = resolved.resources;
@@ -3043,7 +3042,6 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
     if (recorded) {
         for (auto& object : reorderKept) recorder->Keep(std::move(object));
     }
-    if (state.depth && state.renderLayers > 1) StoreLayeredDepthSurface(context, commands, *state.depth, state.renderLayers);
     APS5_LOG_CHARS_OUT_DEBUG("Render pass ended");
     for (auto& binding : targets) {
         if (binding.proxied) {
@@ -3248,7 +3246,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     }
     if (recipe.hasDepth) {
         timer.phase(PhaseSetup);
-        const auto depthView = DepthSurfaceView(context, *state.depth, state.depthWrite);
+        const auto depthView = DepthSurfaceView(context, *state.depth, state.depthWrite, state.renderLayers);
         if (writesDepthTarget(state)) NoteDepthSurfaceWrite(context, *state.depth);
         timer.phase(PhaseReadTarget);
         if (recipe.targetViews.back() != depthView) return miss(DrawRecipeMiss::TargetGone);
