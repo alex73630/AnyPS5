@@ -273,6 +273,7 @@ bool ShadersWriteMemory(std::span<const CompiledShader> shaders) {
             case ShaderRecompiler::DescriptorRole::GuestImages:
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && any(binding.imageWritten, binding.count)) return true;
                 break;
+            case ShaderRecompiler::DescriptorRole::PackedBlendTarget:
             case ShaderRecompiler::DescriptorRole::Gds:
                 return true;
             case ShaderRecompiler::DescriptorRole::BdaPagetable:
@@ -457,6 +458,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
     Require(state.samples == 1 || !state.depth.has_value() || (context.limits.framebufferDepthSampleCounts & static_cast<VkSampleCountFlagBits>(state.samples)) != 0, "device does not support depth targets with the draw's sample count");
     Require(!depthBounds || context.depthBounds, "device does not support the depth bounds test");
     Require(!depthBias || state.depthBiasClamp == 0.0f || context.depthBiasClamp, "device does not support depth bias clamping");
+    Require(state.packedBlend.control == 0 || context.graphicsPipelineLibrary, "packed float blending requires dynamic rendering");
     Require(!state.dualSourceBlend || (context.dualSrcBlend && state.blends.size() <= context.limits.maxFragmentDualSrcAttachments), "device does not support dual-source blending into this many attachments");
     Require(state.reversedBlend == 0 || (context.dualSrcBlend && state.blends.size() <= context.limits.maxFragmentDualSrcAttachments), "blending into a color target with a reversed component order through a second source color needs dual-source blending, which the device does not support");
     Require(LogicOpFromRop(state.colorRop) == VK_LOGIC_OP_COPY || context.logicOp, "device does not support color logic operations");
@@ -561,7 +563,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             subpass.pDepthStencilAttachment = &depthReference;
         }
         std::vector<VkFormat> renderingColors(state.blends.size(), VK_FORMAT_UNDEFINED);
-        for (const auto& color : state.colors) {
+        if (state.packedBlend.control == 0) for (const auto& color : state.colors) {
             if (color.partialWriteMask == 0u) renderingColors.at(color.exportIndex) = color.format;
         }
         VkPipelineRenderingCreateInfoKHR rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
@@ -580,7 +582,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         if (dynamicRendering) {
             depthFormat = state.depth ? HostDepthFormat(context, state.depth->format) : VK_FORMAT_UNDEFINED;
             colorSlots.assign(state.blends.size(), ~0u);
-            for (std::uint32_t index = 0; index < state.colors.size(); ++index) {
+            if (state.packedBlend.control == 0) for (std::uint32_t index = 0; index < state.colors.size(); ++index) {
                 if (state.colors[index].partialWriteMask == 0u) colorSlots.at(state.colors[index].exportIndex) = index;
             }
             this->attachmentLayout = attachmentLayout;
@@ -1018,6 +1020,7 @@ void pipelineKey(std::vector<std::byte>& key, const Context& context, const Stat
     for (const auto word : resources.mainKey) append(key, word);
     append(key, resources.fragmentKey.size());
     for (const auto word : resources.fragmentKey) append(key, word);
+    append(key, state.packedBlend.control != 0);
     append(key, state.hasColorTarget);
     append(key, state.rectList);
     append(key, state.topology);

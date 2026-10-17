@@ -432,6 +432,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 }
                 if (instruction[3] == spv::DecorationPerPrimitiveEXT) module.perPrimitiveMembers.emplace(instruction[1], instruction[2]);
                 break;
+            case spv::OpTypeImage:
             case spv::OpTypeBool:
             case spv::OpTypeInt:
             case spv::OpTypeFloat:
@@ -585,6 +586,12 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             Require(binding->kind == ShaderRecompiler::DescriptorKind::Sampler || binding->kind == ShaderRecompiler::DescriptorKind::SampledImage || binding->kind == ShaderRecompiler::DescriptorKind::StorageImage, "SPIR-V descriptor type disagrees with recompiler binding metadata");
             if (binding->role == ShaderRecompiler::DescriptorRole::ImageTable || binding->role == ShaderRecompiler::DescriptorRole::ImageStorageTable || binding->role == ShaderRecompiler::DescriptorRole::SamplerTable) {
                 Require(type.size() == 3 && (type[0] & 0xffffu) == spv::OpTypeRuntimeArray, "image table must be declared as a runtime descriptor array");
+                continue;
+            }
+            if (binding->role == ShaderRecompiler::DescriptorRole::PackedBlendTarget) {
+                Require(fragment && state.packedBlend.control != 0 && binding->binding == ShaderRecompiler::RuntimeAbi::PackedBlendTargetBinding && binding->count == 1u && binding->kind == ShaderRecompiler::DescriptorKind::StorageImage, "invalid packed blend descriptor");
+                Require(type.size() == 9u && (type[0] & 0xffffu) == spv::OpTypeImage && module.Signature(type[2]) == "u32" && type[3] == spv::Dim2D && type[4] == 0u && type[5] == 1u && type[6] == 0u && type[7] == 2u && type[8] == spv::ImageFormatR32ui, "packed blend target must be a single-sample R32_UINT storage array image");
+                Require(module.modes.contains(spv::ExecutionModePixelInterlockOrderedEXT), "packed blend shader requires ordered pixel interlock");
                 continue;
             }
             Require(type.size() == 4 && (type[0] & 0xffffu) == spv::OpTypeArray, "typed heap must be declared as a descriptor array");

@@ -264,6 +264,7 @@ bool Driver::sameDecode(const DrawDecode& a, const DrawDecode& b) {
     }
     if (p.targetExportPacking != q.targetExportPacking || p.dualSourceBlend != q.dualSourceBlend || p.reversedBlend != q.reversedBlend || p.targetMerge != q.targetMerge || p.alphaToCoverage != q.alphaToCoverage || p.rasterPrimitive != q.rasterPrimitive || p.ditheredAlphaToCoverage != q.ditheredAlphaToCoverage || p.quadPixelMask != q.quadPixelMask || p.quadSampleMask != q.quadSampleMask || p.iteratesSamples != q.iteratesSamples || p.positionLocation != q.positionLocation || p.sampleLocations != q.sampleLocations || p.sampleOrder != q.sampleOrder) return false;
     if (s.samples != t.samples || s.mergedCoverage != t.mergedCoverage || s.truncatedCoverage != t.truncatedCoverage || s.quadSampleMask != t.quadSampleMask || s.pixelEarlyZ != t.pixelEarlyZ || s.pixelKill != t.pixelKill) return false;
+    if (p.packedBlend != q.packedBlend || s.packedBlend != t.packedBlend) return false;
     return true;
 }
 

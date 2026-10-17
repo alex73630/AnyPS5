@@ -10294,7 +10294,13 @@ void float11_11_10TargetTests() {
     changed = queue;
     changed.context[0x1e0] = 0x60010101u;
     for (std::uint32_t i = 0; i < 4; ++i) changed.context[0x105 + i] = 0;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "blending into an 11_11_10 float color target");
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "requires IEEE, unclamped, truncating");
+    changed.context[0x31c] &= ~0x28000u;
+    Require(AgcDriver::Graphics::DecodeState(changed).packedBlend.control == 0x60010101u, "packed float additive blending did not retain its control");
+    changed.context[0x1e0] = 0x40000141u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "packed float MIN/MAX");
+    changed.context[0x1e0] = 0x4000010au;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "packed float SRC_ALPHA_SATURATE");
     changed = queue;
     changed.context[0x8e] = 6;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "partial writes of an 11_11_10 float color target");
@@ -10330,6 +10336,33 @@ void float11_11_10TargetTests() {
     auto invalid = request;
     invalid.context.pixel->targetExportPacking[0] = static_cast<ColorExportPacking>(4);
     expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(invalid)); }, "invalid prepared fragment export packing");
+}
+
+void packedReplaceBlendTests() {
+    using ShaderRecompiler::ColorExportPacking;
+    for (const auto [info, packing] : {std::pair{6u << 2u, ColorExportPacking::Unorm10_11_11}, std::pair{(7u << 2u) | (7u << 8u) | (2u << 11u) | 0x40000u, ColorExportPacking::Float11_11_10}}) {
+        auto queue = makeState();
+        queue.context[0x31c] = (queue.context.at(0x31c) & ~0x41f7cu) | info;
+        queue.context[0x1b3] = 2;
+        queue.context[0x1b4] = 2;
+        queue.context[0x8e] = 7;
+        for (std::uint32_t i = 0; i < 4; ++i) queue.context[0x105 + i] = 0;
+        for (const auto blend : {0x40000001u, 0x60010001u, 0x61000001u, 0x60000001u}) {
+            queue.context[0x1e0] = blend;
+            const auto state = AgcDriver::Graphics::DecodeState(queue);
+            Require(!state.blend.blendEnable && !state.blends[0].blendEnable && state.color.packing == packing && state.blend.colorWriteMask == 7u, "a packed RGB replacement did not retain its packing and writes with host blending disabled");
+        }
+        for (const auto blend : {0x40000000u, 0x40000101u, 0x40000004u, 0x40000021u}) {
+            queue.context[0x1e0] = blend;
+            if (packing == ColorExportPacking::Float11_11_10) {
+                queue.context[0x31c] &= ~0x28000u;
+                const auto state = AgcDriver::Graphics::DecodeState(queue);
+                Require(state.packedBlend.control == blend && !state.blend.blendEnable && state.blend.colorWriteMask == 0u, "packed float blending did not move writes into the fragment shader");
+            } else {
+                expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "color target is unsupported");
+            }
+        }
+    }
 }
 
 AgcDriver::QueueState dualSourceQueue() {

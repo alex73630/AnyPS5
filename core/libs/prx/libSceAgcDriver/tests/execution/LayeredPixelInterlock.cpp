@@ -3,6 +3,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
 #include "VulkanTestDevice.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -52,6 +55,10 @@ alignas(256) constexpr std::array<std::uint32_t, 32> BlendCode{
     0x06141506u, 0xe95e5000u, 0x80000803u, 0xbf8c3f70u, 0x7e1802f2u, 0xf800180fu, 0x0c0c0c0cu, 0xbf810000u,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 7> ExportCode{
+    0xc8120002u, 0xc8160102u, 0xc81a0202u, 0xc81e0302u, 0xf800180fu, 0x07060504u, 0xbf810000u,
+};
+
 struct Vertex {
     std::array<float, 4> position;
     std::array<float, 4> token;
@@ -70,7 +77,31 @@ public:
         std::memset(data, 0, SliceBytes * Slices);
         GuestAllocations::Mutation().Add(data, SliceBytes * Slices, true, true, true);
     }
+    void Fill(AgcDriver::VulkanDevice& device, std::uint32_t word) {
+        AgcDriver::Graphics::StorageTexture::FlushPending(Address(), SliceBytes * Slices, nullptr, "layered test fill");
+        device.WaitIdle();
+        for (std::size_t offset = 0; offset < SliceBytes * Slices; offset += sizeof(word)) std::memcpy(data + offset, &word, sizeof(word));
+    }
+    void Read(AgcDriver::VulkanDevice& device) const {
+        AgcDriver::Graphics::StorageTexture::FlushPending(Address(), SliceBytes * Slices, nullptr, "layered test read");
+        device.WaitIdle();
+        std::vector<std::byte> bytes(SliceBytes * Slices);
+        AgcDriver::GuestMemory::Read(Address(), bytes, 1);
+        const auto* equation = AgcDriver::Graphics::FindTextureSwizzleEquation(static_cast<std::uint32_t>(AgcDriver::Graphics::ColorTileMode::RenderTarget), 4u);
+        Require(equation != nullptr, "layered test requires an R_X swizzle equation");
+        for (std::uint32_t layer = 0; layer < Slices; ++layer) {
+            for (std::uint32_t y = 0; y < Height; ++y) {
+                for (std::uint32_t x = 0; x < Width; ++x) {
+                    std::size_t offset = 0;
+                    const auto coordinates = x | (y << 12u) | (layer << 24u);
+                    for (std::uint32_t bit = 0; bit < equation->bits.size(); ++bit) offset |= static_cast<std::size_t>(std::popcount(coordinates & equation->bits[bit]) & 1u) << bit;
+                    std::memcpy(&Results[layer * Width * Height + y * Width + x], bytes.data() + layer * SliceBytes + offset, 4u);
+                }
+            }
+        }
+    }
     ~Surface() {
+        AgcDriver::Graphics::StorageTexture::FlushPending(Address(), SliceBytes * Slices, nullptr, "layered test release");
         GuestAllocations::Mutation().Remove(data);
 #ifdef _WIN32
         VirtualFree(data, 0, MEM_RELEASE);
@@ -137,14 +168,15 @@ std::array<std::uint32_t, 4> Descriptor(const void* data, std::uint32_t stride, 
     return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), count, stride == 0u ? 0x31016facu : 0x01016facu};
 }
 
-void Draw(AgcDriver::VulkanDevice& device, const Surface& surface, std::uint32_t wave, std::uint32_t drawIndex, bool reverse, bool blend, std::uint32_t overlaps) {
+void Draw(AgcDriver::VulkanDevice& device, const Surface& surface, std::uint32_t wave, std::uint32_t drawIndex, bool reverse, bool blend, std::uint32_t overlaps, bool renderBlend = false, std::uint32_t blendControl = 0x65040504u) {
     const std::array<std::array<float, 4>, 3> corners{{{-1, -1, 0.5f, 1}, {3, -1, 0.5f, 1}, {-1, 3, 0.5f, 1}}};
     std::vector<Vertex> vertices;
     for (std::uint32_t step = 0; step < overlaps; ++step) {
         const auto primitive = reverse ? overlaps - 1u - step : step;
         for (std::uint32_t layer = 0; layer < Slices; ++layer) {
             const auto token = std::bit_cast<float>(Token(primitive, layer, drawIndex));
-            const auto source = blend ? BlendSource(primitive, layer, drawIndex) : std::array<float, 4>{token, token, token, token};
+            auto source = blend ? BlendSource(primitive, layer, drawIndex) : std::array<float, 4>{token, token, token, token};
+            if (renderBlend) std::swap(source[0], source[2]);
             for (const auto& position : corners) vertices.push_back({position, source, layer});
         }
     }
@@ -167,12 +199,14 @@ void Draw(AgcDriver::VulkanDevice& device, const Surface& surface, std::uint32_t
     pixel.interpolatorSettings[0] = 0x400u;
     pixel.inputAddr = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PositionX) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PositionY) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary);
     pixel.posX = pixel.posY = pixel.ancillary = pixel.layerExported = true;
-    pixel.orderedPixelShader = true;
+    pixel.orderedPixelShader = !renderBlend;
+    if (renderBlend) pixel.packedBlend = {blendControl, 0u, {}};
     pixel.executeOnNoop = true;
     pixel.targetOutputMode[0] = 9;
-    pixel.targetExportMapping.fill(0xe4u);
+    pixel.targetExportMapping.fill(renderBlend ? 0xc6u : 0xe4u);
+    if (renderBlend) pixel.targetExportPacking[0] = ShaderRecompiler::ColorExportPacking::Float11_11_10;
     const auto pixelData = Descriptor(Results.data(), 0, sizeof(Results));
-    const auto code = blend ? std::span<const std::uint32_t>(BlendCode) : std::span<const std::uint32_t>(PixelCode);
+    const auto code = renderBlend ? std::span<const std::uint32_t>(ExportCode) : blend ? std::span<const std::uint32_t>(BlendCode) : std::span<const std::uint32_t>(PixelCode);
     const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
     ShaderRecompiler::RecompileRequest fragment{
         {ShaderStage::Fragment, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
@@ -189,6 +223,12 @@ void Draw(AgcDriver::VulkanDevice& device, const Surface& surface, std::uint32_t
     AgcDriver::Graphics::State state{};
     state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0, wave, wave, std::nullopt, std::nullopt};
     state.color = {surface.Address(), {Width, Height}, VK_FORMAT_R8G8B8A8_UNORM, SliceBytes, 0xe4u};
+    if (renderBlend) {
+        state.packedBlend = pixel.packedBlend;
+        state.color.format = VK_FORMAT_R32_UINT;
+        state.color.componentMapping = 0xc6u;
+        state.color.packing = ShaderRecompiler::ColorExportPacking::Float11_11_10;
+    }
     state.color.tileMode = AgcDriver::Graphics::ColorTileMode::RenderTarget;
     state.color.surfaceAddress = state.color.arrayAddress = surface.Address();
     state.color.surfaceExtent = {Width, Height};
@@ -204,7 +244,7 @@ void Draw(AgcDriver::VulkanDevice& device, const Surface& surface, std::uint32_t
     state.scissor = {{0, 0}, {Width, Height}};
     state.cullMode = VK_CULL_MODE_NONE;
     state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    state.blend.colorWriteMask = 15;
+    state.blend.colorWriteMask = renderBlend ? (blendControl != 0 ? 0u : 7u) : 15u;
     state.blends = {state.blend};
     const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(vertices.size()), 0, 1, 0, false};
     device.Draw(state, draw, shaders);
@@ -249,6 +289,21 @@ int main() {
                         }
                     }
                 }
+            }
+        }
+        Surface blendedSurface;
+        for (const auto wave : {64u, 32u}) {
+            for (const bool reverse : {false, true}) {
+                blendedSurface.Fill(*device, 0x780f01e0u);
+                for (std::uint32_t draw = 0; draw < 2u; ++draw) Draw(*device, blendedSurface, wave, draw, reverse, true, Overlaps, true);
+                blendedSurface.Read(*device);
+                Check(wave, 2u, reverse, true, Overlaps);
+                Draw(*device, blendedSurface, wave, 0u, false, true, 1u, true, 0u);
+                blendedSurface.Read(*device);
+                Check(wave, 1u, false, true, 1u);
+                Draw(*device, blendedSurface, wave, 0u, false, true, Overlaps, true);
+                blendedSurface.Read(*device);
+                Check(wave, 1u, false, true, Overlaps);
             }
         }
         std::puts("layered pixel interlock tests passed");

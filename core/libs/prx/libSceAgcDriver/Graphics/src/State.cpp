@@ -1698,6 +1698,21 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             const std::string packed = std::string(color.packing == ShaderRecompiler::ColorExportPacking::Float11_11_10 ? "an " : "a ") + PackedColorTargetName(color.packing);
             const auto slotExport = (exportFormat >> (4u * color.exportIndex)) & 0xfu;
             if (slotExport == 5 || slotExport == 6) throw std::runtime_error("AGC graphics: color export format " + std::to_string(slotExport) + " into " + packed + " target is unsupported");
+            if (state.colorBlendOp == VK_BLEND_OP_ADD && state.srcColorBlendFactor == VK_BLEND_FACTOR_ONE && state.dstColorBlendFactor == VK_BLEND_FACTOR_ZERO) state.blendEnable = VK_FALSE;
+            if (state.blendEnable && color.packing == ShaderRecompiler::ColorExportPacking::Float11_11_10) {
+                const auto info = read(cx, 0x31c + slot * 0xfu);
+                Require(result.colors.size() == 1 && !result.depth && !result.depthTest && !result.depthWrite && !result.stencilTest && result.samples == 1 && !result.alphaToCoverage, "packed float blending requires one single-sample color target without depth, stencil or alpha-to-coverage");
+                Require(color.depth == 1 && color.dccAddress == 0 && color.cmaskAddress == 0, "packed float blending requires an uncompressed 2D color surface");
+                Require((info & 0x03f28000u) == 0 && (info & 0x40000u) != 0, "packed float blending requires IEEE, unclamped, truncating color conversion without blend optimization overrides");
+                Require(!secondSource(state.srcColorBlendFactor) && !secondSource(state.dstColorBlendFactor), "packed float dual-source blending is unsupported");
+                Require(state.colorBlendOp != VK_BLEND_OP_MIN && state.colorBlendOp != VK_BLEND_OP_MAX, "packed float MIN/MAX blending is unsupported");
+                Require((blend & 31u) != 10u && ((blend >> 8u) & 31u) != 10u, "packed float SRC_ALPHA_SATURATE blending is unsupported");
+                Require(mapping == 0xc6u && result.reversedBlend == 0, "packed float blending requires the reversed RGB mapping");
+                Require(slotExport == 4u || slotExport == 9u, "packed float blending requires a complete floating-point RGBA export");
+                result.packedBlend = {blend, color.exportIndex, {}};
+                state.blendEnable = VK_FALSE;
+                state.colorWriteMask = 0;
+            }
             Require(!state.blendEnable, "blending into " + packed + " color target is unsupported");
             const bool nibbles = color.packing == ShaderRecompiler::ColorExportPacking::Unorm4_4_4_4;
             const std::uint32_t packedMask = nibbles ? 0xfu : 7u;
@@ -1733,6 +1748,10 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     for (std::uint32_t i = 0; i < 3; ++i) {
         if ((requiredBlendMask & (1u << i)) != 0) result.blendConstants[i] = requiredBlendConstants[i];
+    }
+    if (result.packedBlend.control != 0) {
+        const auto constant = [](std::uint32_t factor) { return factor == 13u || factor == 14u || factor == 19u || factor == 20u; };
+        if (constant(result.packedBlend.control & 31u) || constant((result.packedBlend.control >> 8u) & 31u)) result.packedBlend.constants = result.blendConstants;
     }
     Require((!result.mergedCoverage && !result.truncatedCoverage) || std::ranges::none_of(result.colors, [](const ColorTarget& color) { return color.partialWriteMask != 0; }), "partial writes of a 4_4_4_4 unorm color target under merged or truncated coverage (a one-sample target under a multisampled rasterizer) are not implemented");
     if (!result.colors.empty()) {

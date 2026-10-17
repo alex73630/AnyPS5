@@ -192,6 +192,7 @@ public:
     // buffer's format and mark the image dirty like a storage write.
     bool Attachable() const { return attachable; }
     VkImageView AttachmentView(VkFormat format, std::uint32_t mip = 0, std::uint32_t depthSlice = 0, std::uint32_t layers = 1, std::uint32_t layer = 0);
+    VkImageView PackedBlendView(std::uint32_t mip, std::uint32_t firstLayer, std::uint32_t layers);
     VkImageView AttachmentProxyView();
     void RecordAttachmentProxyLoad(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
     void RecordAttachmentProxyStore(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
@@ -634,6 +635,7 @@ private:
     std::map<std::uint32_t, VkImageView> elementLayerViews;
     std::int8_t singlePassState = -1;
     bool attachable = false;
+    std::map<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView> packedBlendViews;
     std::map<std::tuple<VkFormat, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>, VkImageView> attachmentViews;
     VkImage proxyImage = VK_NULL_HANDLE;
     VkDeviceMemory proxyMemory = VK_NULL_HANDLE;
