@@ -9830,7 +9830,7 @@ void unorm10_11_11TargetTests() {
     changed.context[0x31c] |= 1u << 8u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "unsupported color format 6 number type 1");
     changed = queue;
-    changed.context[0x1e0] = 0x40010001u;
+    changed.context[0x1e0] = 0x40010101u;
     for (std::uint32_t i = 0; i < 4; ++i) changed.context[0x105 + i] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "blending into a 10_11_11 unorm color target");
     changed = queue;
@@ -11994,6 +11994,7 @@ int main(int argc, char** argv) {
         unorm10_11_11TargetTests();
         float11_11_10TargetTests();
         unorm4_4_4_4TargetTests();
+        packedReplaceBlendTests();
         DepthBoundsBiasTests();
         conservativeZExportTests();
         earlyFragmentTestsTests();
