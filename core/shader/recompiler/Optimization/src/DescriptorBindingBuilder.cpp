@@ -194,6 +194,7 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
         for (const auto& pair : info.sampledPairs) {
             if (pair.sampler != r) continue;
             const auto& image = info.images.at(pair.image);
+            if (image.table == NoTable && ResourceMaterializer::IsNullImage(image, snapshot.images.at(pair.image))) continue;
             if (!image.singleMipPlaneBiasCompatible || image.dimension != RdnaImageDimension::Dim2D) continue;
             const auto mode = ResourceMaterializer::RuntimeImageMode(image, snapshot.images.at(pair.image), info.runtimeImageModes.at(pair.image));
             if (info.runtimeImageModes.at(pair.image).at(mode).dimension != RdnaImageDimension::Dim3D) continue;
@@ -223,6 +224,7 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
             if (base.table != NoTable) {
                 failUnnormalized("samples an image selected at run time");
             }
+            if (ResourceMaterializer::IsNullImage(base, snapshot.images.at(pair.image))) continue;
             const auto& image = info.runtimeImageModes.at(pair.image).at(ResourceMaterializer::RuntimeImageMode(base, snapshot.images.at(pair.image), info.runtimeImageModes.at(pair.image)));
             const auto* reason = ResourceMaterializer::UnnormalizedSampleMismatch(image);
             if (reason != nullptr && ResourceMaterializer::NullImageDescriptor(base, snapshot.images.at(pair.image))) {
@@ -311,15 +313,23 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
     const auto unnormalized = ProveUnnormalized(info, snapshot);
     for (std::uint32_t index = 0; index < info.samplers.size(); ++index) {
         if (FoldsTexelOffsets(info.samplers[index])) plan.specialization.push_back({PipelineSpecialization::FoldOffsetBase + index, unnormalized.samplers[index] ? 1u : 0u});
-        if (SamplesBaseLevelIfUnnormalized(info.samplers[index])) plan.specialization.push_back({PipelineSpecialization::UnnormalizedBaseLevelBase + index, unnormalized.samplers[index] ? 1u : 0u});
+        plan.specialization.push_back({PipelineSpecialization::UnnormalizedBaseLevelBase + index, unnormalized.samplers[index] ? 1u : 0u});
     }
     std::vector<std::uint32_t> compareStates(info.images.size());
+    std::vector<std::array<std::uint32_t, 2>> samplerLods(info.images.size());
     for (std::uint32_t index = 0; index < info.images.size(); ++index) {
-        const bool convertedSample = !info.images[index].srgbDecodeCompatible && index < info.runtimeImageModes.size() && std::ranges::any_of(info.runtimeImageModes.at(index), [](const ImageResource& mode) { return mode.conversionFormat == IrBufferFormat::Format11_11_10UNorm; });
+        const bool convertedSample = !info.images[index].srgbDecodeCompatible && index < info.runtimeImageModes.size() && std::ranges::any_of(info.runtimeImageModes.at(index), [](const ImageResource& mode) { return mode.conversionFormat == IrBufferFormat::Format11_11_10UNorm || mode.conversionFormat == IrBufferFormat::Format10_11_11Float; });
         if (!info.images[index].depthCompare && !convertedSample) continue;
         const auto compare = compareStates[index] = ResourceMaterializer::EmulatedCompareState(info, snapshot, index);
+        if (convertedSample && compare != 0u) {
+            for (const auto& pair : info.sampledPairs) {
+                if (pair.image != index) continue;
+                const auto& words = snapshot.samplers.at(pair.sampler).dwords;
+                samplerLods[index] = {words[1], words[2]};
+            }
+        }
         const auto first = PipelineSpecialization::CompareBase + index * PipelineSpecialization::CompareWords;
-        const std::array<std::uint32_t, 6> values{EmulatedCompare::Function(compare), (compare & EmulatedCompare::Linear) != 0u, EmulatedCompare::AddressX(compare), EmulatedCompare::AddressY(compare), EmulatedCompare::Reference(compare), (compare & EmulatedCompare::BorderWhite) != 0u};
+        const std::array<std::uint32_t, 9> values{EmulatedCompare::Function(compare), (compare & EmulatedCompare::Linear) != 0u, EmulatedCompare::AddressX(compare), EmulatedCompare::AddressY(compare), EmulatedCompare::Reference(compare), (compare & EmulatedCompare::BorderWhite) != 0u, samplerLods[index][0], samplerLods[index][1], EmulatedCompare::AddressZ(compare)};
         for (std::uint32_t word = 0; word < values.size() && !registrationModules; ++word) plan.specialization.push_back({first + word, values[word]});
     }
     std::vector<std::uint32_t> imageModes(info.images.size());
@@ -507,6 +517,8 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
         RuntimeAbi::ResourceMetadata metadata{};
         if (descriptor.dwordCount != metadata.descriptor.size()) fail("invalid runtime image descriptor width");
         metadata.elementCount = 1u;
+        metadata.samplerLodRange = samplerLods[resource][0];
+        metadata.samplerLodControl = samplerLods[resource][1];
         if (imageModes[resource] > RuntimeAbi::ImageModeMask) fail("runtime image mode exceeds its metadata field");
         metadata.flags = imageModes[resource] << 1u | (registrationModules ? (compareStates[resource] & RuntimeAbi::CompareStateMask) << RuntimeAbi::CompareStateShift : 0u);
         if (descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u) metadata.flags |= 1u;

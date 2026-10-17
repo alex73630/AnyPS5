@@ -9,7 +9,7 @@
 
 namespace ShaderRecompiler::RuntimeAbi {
 
-inline constexpr std::uint32_t Version = 14u;
+inline constexpr std::uint32_t Version = 17u;
 inline constexpr std::uint32_t DescriptorSet = 0u;
 inline constexpr std::uint32_t FragmentDescriptorSet = 1u;
 inline constexpr std::uint32_t StageCount = 4u;
@@ -42,7 +42,7 @@ inline constexpr std::uint32_t ImageCapacity = 256u;
 inline constexpr std::uint32_t SampledHeapCapacity = 64u;
 inline constexpr std::uint32_t BindlessTableSlots = 16u;
 inline constexpr std::uint32_t StorageMipSlots = 16u;
-inline constexpr std::uint32_t StorageHeapCapacity = 64u;
+inline constexpr std::uint32_t StorageHeapCapacity = 128u;
 inline constexpr std::uint32_t SamplerHeapCapacity = 64u;
 inline constexpr std::uint32_t StateExportMappings = 0u;
 inline constexpr std::uint32_t StateDwords = 2u;
@@ -50,11 +50,11 @@ inline constexpr std::uint32_t StateVertexSelectors = 0u;
 inline constexpr std::uint32_t VertexSelectorsPerDword = 2u;
 inline constexpr std::uint32_t ImageModeMask = 0xffu;
 inline constexpr std::uint32_t CompareStateShift = 9u;
-inline constexpr std::uint32_t CompareStateMask = 0x1fffu;
+inline constexpr std::uint32_t CompareStateMask = 0x7fffu;
 
 struct ResourceMetadata {
-    std::uint32_t binding;
-    std::uint32_t firstElement;
+    std::uint32_t samplerLodRange;
+    std::uint32_t samplerLodControl;
     std::uint32_t elementCount;
     std::uint32_t flags;
     std::array<std::uint32_t, 8> descriptor;

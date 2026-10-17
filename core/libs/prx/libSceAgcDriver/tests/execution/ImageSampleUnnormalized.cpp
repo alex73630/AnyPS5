@@ -340,6 +340,12 @@ int main() {
         Require(unequalFilterSamples == magFilterReference, "unnormalized sampler with unequal filters does not sample with its magnification filter");
         const auto clampModeZeroSamples = Run(*device, Plain, single, {0x00008090u, 0x00fff000u, 0x05500000u, 0u}, coordinates);
         Require(clampModeZeroSamples == magFilterReference, "unnormalized sampler with clamp mode 0 does not sample with clamp mode 2");
+        auto volumeCode = LevelZeroCode;
+        volumeCode[6] = 0xf09c0f10u;
+        const Program nullVolume{volumeCode, {"image_sample_lz 3D", "", ""}, LevelZero.offsets, 1u};
+        for (const auto& sample : Run(*device, nullVolume, {}, Samplers[0].words, coordinates)) {
+            for (std::uint32_t channel = 0; channel < 4u; ++channel) Require(sample[channel] == 0u, "unnormalized null volume did not return zero");
+        }
         const auto constantView = [&](std::uint32_t type, std::uint32_t format, std::uint32_t swizzle) {
             auto descriptor = TextureDescriptor(SingleLevel.data(), 0u, 0u);
             descriptor[1] = (descriptor[1] & ~(0x1ffu << 20u)) | (format << 20u);

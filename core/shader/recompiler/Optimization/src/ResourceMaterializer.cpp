@@ -268,11 +268,11 @@ ImageDecode inspectImageDescriptor(const DescriptorValue& descriptor, const Imag
     if (format == IrBufferFormat::Format11_11_10UNorm || (format == IrBufferFormat::Format10_11_11Float && !nativeRepacked)) {
         const bool floating = format == IrBufferFormat::Format10_11_11Float;
         if (!base.srgbDecodeCompatible) {
-            if (floating) return rejectImage(PoisonReason::Conversion, "samples or gathers a converted float image, or queries its LOD, which is not implemented");
-            if (storage || base.depthCompare || (base.emulatedCompare & EmulatedCompare::ConvertedSampleUnsupported) != 0u) return rejectImage(PoisonReason::Conversion, "sampling, gathering or querying LOD of a converted unorm image is not implemented");
-            if (base.table != NoTable) return rejectImage(PoisonReason::Conversion, "samples a converted unorm image selected through an image table, which is not implemented");
-            if (decoded.cube || (decoded.dimension != RdnaImageDimension::Dim2D && decoded.dimension != RdnaImageDimension::Dim2DArray)) return rejectImage(PoisonReason::Conversion, "samples a converted unorm image that is not a 2D or 2D array view, which is not implemented");
-            if ((base.emulatedCompare & EmulatedCompare::ConvertedSampleRequiresSingleLevel) != 0u && ((descriptor.dwords[3] >> 12u) & 0xfu) != ((descriptor.dwords[3] >> 16u) & 0xfu)) return rejectImage(PoisonReason::Conversion, "samples a converted unorm image with several mip levels at a LOD that is not 0, which is not implemented");
+            const auto kind = std::string(floating ? "a converted float image" : "a converted unorm image");
+            if (storage || base.depthCompare || (base.emulatedCompare & EmulatedCompare::ConvertedSampleUnsupported) != 0u) return rejectImage(PoisonReason::Conversion, floating ? "samples or gathers a converted float image, or queries its LOD, which is not implemented" : "sampling, gathering or querying LOD of a converted unorm image is not implemented");
+            if (base.table != NoTable) return rejectImage(PoisonReason::Conversion, "samples " + kind + " selected through an image table, which is not implemented");
+            if (decoded.dimension != RdnaImageDimension::Dim2D && decoded.dimension != RdnaImageDimension::Dim2DArray && decoded.dimension != RdnaImageDimension::Dim3D) return rejectImage(PoisonReason::Conversion, "samples " + kind + " that is not a 2D, 2D array, cube or 3D view, which is not implemented");
+            if ((base.emulatedCompare & EmulatedCompare::ConvertedSampleRequiresSingleLevel) != 0u && ((descriptor.dwords[3] >> 12u) & 0xfu) != ((descriptor.dwords[3] >> 16u) & 0xfu)) return rejectImage(PoisonReason::Conversion, "samples " + kind + " with several mip levels at a LOD that is not 0, which is not implemented");
         }
         if (!base.depthBitsCompatible) return rejectImage(PoisonReason::Conversion, floating ? "reads or writes a converted float image with 16-bit data, which is not implemented" : "reads or writes a converted unorm image with 16-bit data, which is not implemented");
         for (std::uint32_t component = 0; component < 4u; ++component) {
@@ -1401,7 +1401,7 @@ std::uint32_t colorCompareReference(IrBufferFormat format) {
 }
 
 bool convertedSampleCompatible(const ImageResource& image) {
-    return image.resourceClass != ImageResourceClass::Storage && !image.depthCompare && !image.atomic && !image.packed && image.table == NoTable && image.depthBitsCompatible && (image.emulatedCompare & EmulatedCompare::ConvertedSampleUnsupported) == 0u && (image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray);
+    return image.resourceClass != ImageResourceClass::Storage && !image.depthCompare && !image.atomic && !image.packed && image.table == NoTable && image.depthBitsCompatible && (image.emulatedCompare & EmulatedCompare::ConvertedSampleUnsupported) == 0u && (image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray || image.dimension == RdnaImageDimension::Dim3D);
 }
 
 std::uint32_t convertedSampleState(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint32_t index) {
@@ -1410,23 +1410,51 @@ std::uint32_t convertedSampleState(const ShaderInfo& info, const ResourceSnapsho
     const auto& descriptor = snapshot.images[index];
     if (descriptor.dwordCount != 8u || nullImageDescriptor(image, descriptor)) return 0u;
     const auto format = rawImageFormat(descriptor);
-    if (format != IrBufferFormat::Format11_11_10UNorm) return 0u;
+    if (format != IrBufferFormat::Format11_11_10UNorm && format != IrBufferFormat::Format10_11_11Float) return 0u;
+    if (((descriptor.dwords[1] >> 8u) & 0xfffu) > ((descriptor.dwords[3] >> 12u) & 0xfu) * 256u) throw std::runtime_error("sampling of a converted image with an image-view minimum LOD clamp is not implemented");
     std::optional<std::uint32_t> samplerState;
+    std::optional<std::array<std::uint32_t, 2>> samplerLod;
     for (const auto& pair : info.sampledPairs) {
         if (pair.image != index) continue;
         if (pair.sampler >= snapshot.samplers.size() || snapshot.samplers[pair.sampler].dwordCount != 4u) throw std::runtime_error("sampling of a converted image has no sampler descriptor");
         const auto& words = snapshot.samplers[pair.sampler].dwords;
+        const bool volume = rawImageType(descriptor) == ImageType::Color3D;
+        const std::array<std::uint32_t, 2> lod{words[1] & 0x00ffffffu, words[2] & (volume ? 0x0f003fffu : 0x0c003fffu)};
+        if (volume && ((words[2] >> 24u) & 3u) == 3u) throw std::runtime_error("sampling of a converted volume has a reserved Z filter");
+        const auto mipFilter = (words[2] >> 26u) & 3u;
+        if (mipFilter > 2u) throw std::runtime_error("sampling of a converted image has a reserved mip filter");
+        if (mipFilter != 0u && (words[1] & 0xfffu) > ((words[1] >> 12u) & 0xfffu)) throw std::runtime_error("sampling of a converted image has a reversed LOD range");
+        if (samplerLod.has_value() && *samplerLod != lod) throw std::runtime_error("sampling of a converted image through samplers with different LOD settings is not implemented");
+        samplerLod = lod;
         if (((words[0] >> 29u) & 0x3u) != 0u) throw std::runtime_error("sampling of a converted image through a min or max reduction sampler is not implemented");
-        if (((words[0] >> 15u) & 0x1u) != 0u) throw std::runtime_error("sampling of a converted image does not implement unnormalized coordinates");
+        const bool unnormalized = (words[0] & (1u << 15u)) != 0u;
         const auto magFilter = (words[2] >> 20u) & 0x3u;
         const auto minFilter = (words[2] >> 22u) & 0x3u;
-        if (magFilter != minFilter || magFilter > 1u) throw std::runtime_error("sampling of a converted image is implemented only with equal point or bilinear minification and magnification filters");
-        const auto addressMode = [](std::uint32_t clamp) {
+        if (unnormalized) {
+            if (magFilter > 1u || minFilter > 1u || mipFilter != 0u) throw std::runtime_error("unnormalized sampling of a converted image requires point or bilinear filters and disabled mip filtering");
+        } else if (magFilter != minFilter || magFilter > 1u) throw std::runtime_error("sampling of a converted image is implemented only with equal point or bilinear minification and magnification filters");
+        if (volume && (words[0] & (1u << 27u)) == 0u && (magFilter == 0u || ((words[2] >> 24u) & 3u) == 1u)) throw std::runtime_error("point sampling of a converted volume without TRUNC_COORD is not implemented");
+        const auto addressMode = [unnormalized](std::uint32_t clamp) {
+            if (unnormalized) {
+                if (clamp == 0u || clamp == 2u) return EmulatedCompare::AddressEdge;
+                if (clamp == 6u) return EmulatedCompare::AddressBorder;
+                throw std::runtime_error("unnormalized sampling of a converted image requires clamp-to-edge or clamp-to-border addressing");
+            }
             if (clamp == 0u) return EmulatedCompare::AddressWrap;
+            if (clamp == 1u) return EmulatedCompare::AddressMirror;
             if (clamp == 2u) return EmulatedCompare::AddressEdge;
-            throw std::runtime_error("sampling of a converted image is implemented only with wrap or clamp-to-edge addressing");
+            throw std::runtime_error("sampling of a converted image is implemented only with wrap, mirrored-repeat or clamp-to-edge addressing");
         };
-        const auto state = EmulatedCompare::Enabled | (magFilter == 1u ? EmulatedCompare::Linear : 0u) | (addressMode(words[0] & 0x7u) << EmulatedCompare::ClampXShift) | (addressMode((words[0] >> 3u) & 0x7u) << EmulatedCompare::ClampYShift);
+        const bool cube = rawImageType(descriptor) == ImageType::Cube;
+        const bool cubeWrap = cube && (words[0] & (1u << 28u)) == 0u;
+        const auto addressX = cubeWrap ? EmulatedCompare::AddressEdge : addressMode(words[0] & 0x7u);
+        const auto addressY = cubeWrap ? EmulatedCompare::AddressEdge : addressMode((words[0] >> 3u) & 0x7u);
+        const auto addressZ = volume ? addressMode((words[0] >> 6u) & 0x7u) : EmulatedCompare::AddressWrap;
+        const bool border = addressX == EmulatedCompare::AddressBorder || addressY == EmulatedCompare::AddressBorder;
+        const auto borderType = (words[3] >> 30u) & 3u;
+        if (border && borderType == 3u) throw std::runtime_error("sampling of a converted image with a border color table is not implemented");
+        if (border && magFilter == 0u) throw std::runtime_error("point sampling of a converted image with clamp-to-border is not implemented");
+        const auto state = EmulatedCompare::Enabled | (magFilter == 1u ? EmulatedCompare::Linear : 0u) | (addressX << EmulatedCompare::ClampXShift) | (addressY << EmulatedCompare::ClampYShift) | (addressZ << EmulatedCompare::ClampZShift) | (cubeWrap && magFilter == 1u ? EmulatedCompare::SeamlessConvertedCube : 0u) | (border && borderType == 2u ? EmulatedCompare::BorderWhite : 0u);
         if (samplerState.has_value() && *samplerState != state) throw std::runtime_error("sampling of a converted image through samplers that disagree is not implemented");
         samplerState = state;
     }
@@ -1519,7 +1547,8 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
         if (image.table != NoTable) continue;
         const auto& descriptor = snapshot.images.at(i);
         if (!image.convertedSamples && !image.srgbDecodeCompatible && convertedSampleCompatible(image) && descriptor.dwordCount == 8u && !nullImageDescriptor(image, descriptor)) {
-            if (rawImageFormat(descriptor) == IrBufferFormat::Format11_11_10UNorm) throw ConvertedSampleRequired("samples a converted image through a shader prepared without converted-sample modes");
+            const auto format = rawImageFormat(descriptor);
+            if (format == IrBufferFormat::Format11_11_10UNorm || format == IrBufferFormat::Format10_11_11Float) throw ConvertedSampleRequired("samples a converted image through a shader prepared without converted-sample modes");
         }
         static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, plan.info.runtimeImageModes.at(i)));
     }
@@ -1892,6 +1921,19 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
         mode.shaderSwizzle = ShaderImageIdentitySwizzle;
         if (conversion == IrBufferFormat::Format11_11_10UNorm || conversion == IrBufferFormat::Format10_11_11Float) mode.shaderSwizzle = 0x2acu;
         modes.push_back(mode);
+        if (image.mipCountQueryOnly && !storage && !table && image.dimension != RdnaImageDimension::Dim2DMsaa && image.dimension != RdnaImageDimension::Dim2DMsaaArray) {
+            for (const auto dimension : {RdnaImageDimension::Dim1D, RdnaImageDimension::Dim1DArray, RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray, RdnaImageDimension::Dim3D}) {
+                if (dimension == image.dimension) continue;
+                auto query = mode;
+                query.dimension = dimension;
+                modes.push_back(query);
+            }
+            auto cube = mode;
+            cube.dimension = RdnaImageDimension::Dim2DArray;
+            cube.cube = true;
+            modes.push_back(cube);
+            return;
+        }
         const bool volumeLoad = (image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray) && image.fmaskCompatible && conversion != FmaskExpansion;
         const bool volumeStore = image.dimension == RdnaImageDimension::Dim2DArray && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage;
         const bool volumePlaneBias = image.dimension == RdnaImageDimension::Dim2D && image.singleMipPlaneBiasCompatible && !storage && image.table == NoTable && conversion == IrBufferFormat::Invalid;
@@ -1994,7 +2036,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             if (!storage) append(IrTextureNumericClass::Sint, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
             append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10UInt, IrBufferFormat::Invalid, false, false);
             if ((image.srgbDecodeCompatible || (image.convertedSamples && convertedSampleCompatible(image))) && image.depthBitsCompatible) append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10UNorm, IrBufferFormat::Invalid, false, false);
-            if (image.srgbDecodeCompatible && image.depthBitsCompatible) append(IrTextureNumericClass::Uint, IrBufferFormat::Format10_11_11Float, IrBufferFormat::Invalid, false, false);
+            if ((image.srgbDecodeCompatible || (image.convertedSamples && convertedSampleCompatible(image))) && image.depthBitsCompatible) append(IrTextureNumericClass::Uint, IrBufferFormat::Format10_11_11Float, IrBufferFormat::Invalid, false, false);
             if (storage) {
                 for (const auto format : {IrBufferFormat::Format5_6_5UNorm, IrBufferFormat::Format5_5_5_1UNorm, IrBufferFormat::Format4_4_4_4UNorm}) {
                     append(IrTextureNumericClass::Uint, format, IrBufferFormat::Invalid, false, false);
@@ -2070,12 +2112,17 @@ bool ResourceMaterializer::NullImageDescriptor(const ImageResource& image, const
     return nullImageDescriptor(image, descriptor);
 }
 
+bool ResourceMaterializer::IsNullImage(const ImageResource& image, const DescriptorValue& descriptor) {
+    if (descriptor.dwordCount != 8u) throw std::runtime_error("image descriptor must contain eight dwords");
+    return nullImageDescriptor(image, descriptor);
+}
+
 const char* ResourceMaterializer::UnnormalizedSampleMismatch(const ImageResource& image) {
     if (image.table != NoTable) return "samples an image selected at run time";
     if (image.constantSwizzle) return nullptr;
     if ((image.dimension != RdnaImageDimension::Dim1D && image.dimension != RdnaImageDimension::Dim2D) || image.cube) return "samples a 1D-array, 2D-array, 3D, cube or multisampled image";
     if (image.depthCompare) return "is used with depth comparison";
-    if (image.conversionFormat != IrBufferFormat::Invalid || image.packed) return "samples an image that needs a format conversion or packed access";
+    if ((image.conversionFormat != IrBufferFormat::Invalid && image.conversionFormat != IrBufferFormat::Format11_11_10UNorm && image.conversionFormat != IrBufferFormat::Format10_11_11Float) || image.packed) return "samples an image that needs an unsupported format conversion or packed access";
     return nullptr;
 }
 
@@ -2083,7 +2130,9 @@ RuntimeImageModeMatch ResourceMaterializer::TryRuntimeImageMode(const ImageResou
     RuntimeImageModeMatch result;
     const auto reject = [&](PoisonReason reason, std::string detail) {
         result.reason = reason;
-        result.detail = std::move(detail);
+        char context[160];
+        std::snprintf(context, sizeof(context), "; first image use 0x%x; T# %08x %08x %08x %08x %08x %08x %08x %08x", image.firstUsePc, descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
+        result.detail = std::move(detail) + context;
         return result;
     };
     if (descriptor.dwordCount != 8u) throw std::runtime_error("runtime image descriptor must contain eight dwords");
