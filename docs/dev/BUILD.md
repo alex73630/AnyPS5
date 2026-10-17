@@ -162,6 +162,20 @@ With `CMAKE_OSX_ARCHITECTURES=x86_64` Apple silicon runs the tests through Roset
 
 On Windows MinGW frees `thread_local` objects before their destructors run, so the Tracy client is built without `thread_local` destructors and never destroys its event queue: a thread that emitted a zone and ended keeps its event blocks (2 MiB each) until the process exits.
 
+## Pipeline journal warm-up
+
+Use an existing shader cache recorded by the current build, GPU and driver. Stop the game before warming its cache in a separate process.
+
+1. Build the tool: `cmake --build build --target agc_pipeline_warmup`.
+2. Run `build/core/libs/prx/libSceAgcDriver/agc_pipeline_warmup /path/to/shader_cache --threads 4`.
+3. Check the reported pipeline counts and exit status before starting the game with the same `ANYPS5_SHADER_CACHE_DIR`.
+
+The tool replays the journal's graphics and compute pipeline recipes without running game code, then saves the native Vulkan pipeline cache. It loads the existing native cache before replay. `--threads` selects the replay worker count; without it, `APS5_PIPELINE_JOURNAL_THREADS` applies and defaults to half the logical CPU count. `--entries` sets the replay limit; the default is 1024. Skipped, rejected, failed or unreadable entries produce a nonzero exit status. More workers increase peak memory use.
+
+Only recorded pipelines can be warmed. Newly encountered draw state still compiles during gameplay, and shader compiler changes invalidate the journal. The normal runtime already replays the journal in parallel during loading. `APS5_PREBUILD_THREADS` separately controls early shader-library builds and defaults to one; it does not parallelize an individual Vulkan pipeline compilation.
+
+Set `APS5_SHADER_STATUS=1` when launching a title to show shader preparation jobs and Vulkan pipeline builds in the window title. It refreshes four times per second from the window event loop, including when no frames arrive. Preparation counts cover the registration and early-library worker queues. Vulkan counts cover guest graphics pipelines, graphics pipeline libraries, links and compute pipelines, including journal replay and native-cache reuse; they do not count unique shaders or internal texture-transfer helpers. A zero queue does not mean loading is complete: the title discovers additional work during execution. The title bar is hidden in fullscreen mode, and updates pause if presentation itself blocks.
+
 ## Compute pipeline replay
 
 Build `agc_compute_pipeline_replay` in the full build with `-DANYPS5_ENABLE_SPIRV_TOOLS=ON`; replay validates the captured module before calling Vulkan. Set `APS5_DUMP_COMPUTE_PIPELINES` to a dedicated empty directory before starting a title to save each uncached compute pipeline's final SPIR-V, descriptor layouts, push constant ranges, specialization values, subgroup size and creation flags before compilation. Files are named `compute-<identity>/capture.aps5cp`; identical records are deduplicated. The pipelines of the start-up f32 denormal flush probe are not captured. Capture stops with an error at 128 records, 256 MiB total or 36 MiB per record (at most 8,388,608 SPIR-V words, or 32 MiB of shader code). Capture files contain shader code and device metadata, but no guest buffers or textures; review them before sharing.
