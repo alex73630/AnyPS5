@@ -76,6 +76,7 @@ public:
     static const char* UnnormalizedSampleMismatch(const ImageResource& image);
     static std::shared_ptr<const ResolvedImageTables> ResolveImageTablesShared(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint64_t memoKey);
     static bool NullImageDescriptor(const ImageResource& image, const DescriptorValue& descriptor);
+    static bool IsNullImage(const ImageResource& image, const DescriptorValue& descriptor);
     static ResolvedImageTables ResolveImageTables(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint64_t memoKey = 0);
     [[nodiscard]] IrResourcePlan ExtractPlan(const IrProgram& program) const;
     static void CompactPlan(IrResourcePlan& plan);

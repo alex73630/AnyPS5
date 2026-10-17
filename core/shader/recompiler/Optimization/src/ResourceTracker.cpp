@@ -1921,6 +1921,7 @@ private:
             throw std::runtime_error("an image accessed by 64-bit atomics is also accessed in another way");
         }
         image.atomic64 = atomic64;
+        image.mipCountQueryOnly = ((!image.read && !image.written) || image.mipCountQueryOnly) && op == IrOpcode::ImageQueryDimensions && memory.dmask == 8u && memory.dataBits == 32u && !memory.imagePacked && !memory.imageR128 && memory.imageByElements == 0u;
         image.firstUsePc = std::min(image.firstUsePc, pc);
         image.read = image.read || !write || atomic;
         image.written = image.written || write;
@@ -1954,7 +1955,7 @@ private:
             if ((memory.imageSampleFlags & RdnaImageSampleFlagLevelZero) == 0u) image.emulatedCompare |= EmulatedCompare::RequiresSingleLevel;
         } else if (ImageOpcodeInfoOf(op).needsSampler) {
             if (op != IrOpcode::ImageSampleRaw) image.emulatedCompare |= EmulatedCompare::ConvertedSampleUnsupported;
-            if ((memory.imageSampleFlags & RdnaImageSampleFlagLevelZero) == 0u) image.emulatedCompare |= EmulatedCompare::ConvertedSampleRequiresSingleLevel;
+            if ((memory.imageSampleFlags & (RdnaImageSampleFlagLevelZero | RdnaImageSampleFlagLod)) == 0u) image.emulatedCompare |= EmulatedCompare::ConvertedSampleRequiresSingleLevel;
         }
     }
 

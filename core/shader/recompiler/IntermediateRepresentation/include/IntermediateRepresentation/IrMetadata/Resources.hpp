@@ -40,15 +40,18 @@ inline constexpr std::uint32_t Unsupported = 1u << 31u;
 inline constexpr std::uint32_t RequiresSingleLevel = 1u << 30u;
 inline constexpr std::uint32_t Enabled = 1u << 0u;
 inline constexpr std::uint32_t FunctionShift = 1u;
+inline constexpr std::uint32_t SeamlessConvertedCube = 1u << FunctionShift;
 inline constexpr std::uint32_t Linear = 1u << 4u;
 inline constexpr std::uint32_t ClampXShift = 5u;
 inline constexpr std::uint32_t ClampYShift = 7u;
 inline constexpr std::uint32_t ReferenceShift = 9u;
 inline constexpr std::uint32_t SingleLevel = 1u << 11u;
 inline constexpr std::uint32_t BorderWhite = 1u << 12u;
+inline constexpr std::uint32_t ClampZShift = 13u;
 inline constexpr std::uint32_t AddressWrap = 0u;
 inline constexpr std::uint32_t AddressEdge = 1u;
 inline constexpr std::uint32_t AddressBorder = 2u;
+inline constexpr std::uint32_t AddressMirror = 3u;
 inline constexpr std::uint32_t ReferenceFloat = 0u;
 inline constexpr std::uint32_t ReferenceUnorm = 1u;
 inline constexpr std::uint32_t ReferenceSnorm = 2u;
@@ -56,6 +59,7 @@ inline constexpr std::uint32_t ReferenceZero = 3u;
 [[nodiscard]] inline std::uint32_t Function(std::uint32_t state) { return (state >> FunctionShift) & 0x7u; }
 [[nodiscard]] inline std::uint32_t AddressX(std::uint32_t state) { return (state >> ClampXShift) & 0x3u; }
 [[nodiscard]] inline std::uint32_t AddressY(std::uint32_t state) { return (state >> ClampYShift) & 0x3u; }
+[[nodiscard]] inline std::uint32_t AddressZ(std::uint32_t state) { return (state >> ClampZShift) & 0x3u; }
 [[nodiscard]] inline std::uint32_t Reference(std::uint32_t state) { return (state >> ReferenceShift) & 0x3u; }
 }
 
@@ -88,6 +92,7 @@ struct ImageResource {
     bool packed = false;
     bool fmaskCompatible = true;
     bool depthBitsCompatible = true;
+    bool mipCountQueryOnly = false;
     bool constantSwizzle = false;
     bool constantSwizzleCompatible = true;
     bool cubeFaceCompatible = true;

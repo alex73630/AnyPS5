@@ -6846,7 +6846,7 @@ void verifyUnnormalizedSamplers() {
     reject(0xf09c0f18u, imageData(unnormalized, TypeCube, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a cube T# was accepted");
     reject(0xf09c0f10u, imageData(unnormalized, Type3D, Format8888UNorm, 3u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 3D T# was accepted");
     reject(0xf09c0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array sample was accepted");
-    reject(0xf09c0f08u, imageData(unnormalized, Type2D, Format11_11_10UInt, 0u), "unnormalized guest sampler samples an image that needs a format conversion or packed access", "unnormalized samplers: a T# with a format conversion was accepted");
+    reject(0xf09c0f08u, imageData(unnormalized, Type2D, Format11_11_10UInt, 0u), "unnormalized guest sampler samples an image that needs an unsupported format conversion or packed access", "unnormalized samplers: a T# with an unsupported format conversion was accepted");
     reject(0xf15c0108u, userData(unnormalized), "unnormalized guest sampler is used by a gather, which is not implemented", "unnormalized samplers: image_gather4_lz_o was accepted");
     reject(0xf0fc0f08u, imageData(unnormalized, Type2D, Format32Float, 0u), "unnormalized guest sampler is used with depth comparison, which is not implemented", "unnormalized samplers: image_sample_c_lz_o was accepted");
     reject(0xf0dc0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array image_sample_lz_o was accepted");
@@ -7032,9 +7032,12 @@ void verifyUnusedUnnormalizedSampler() {
     snapshot.images = {DescriptorValue{{0x00001000u, 0x03800000u, 0x0000c000u, 0x90000facu, 0u, 0u, 0u, 0u}, 8u}};
     snapshot.samplers = {DescriptorValue{{0x00008092u, 0x00fff000u, 0x05500000u, 0u}, 4u}};
     const auto populate = [&](ShaderInfo shader) {
-        shader.runtimeImageModes = {ResourceMaterializer::RuntimeImageModes(shader.images[0])};
         BindingAllocationResult allocation;
-        allocation.layout.descriptors = {{DescriptorBindingForImage(shader.images[0]), {0u}}, {DescriptorBindingKind::Samplers, {0u}}};
+        for (std::uint32_t index = 0; index < shader.images.size(); ++index) {
+            shader.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(shader.images[index]));
+            allocation.layout.descriptors.push_back({DescriptorBindingForImage(shader.images[index]), {index}});
+        }
+        allocation.layout.descriptors.push_back({DescriptorBindingKind::Samplers, {0u}});
         DescriptorBindingBuilder{}.Populate(allocation, shader, IrShaderStage::Compute, 0u, snapshot, {});
         return allocation.bindings;
     };
@@ -7051,6 +7054,18 @@ void verifyUnusedUnnormalizedSampler() {
     require(std::none_of(tableModes.begin(), tableModes.end(), [](const auto& mode) { return mode.constantSwizzle; }), "constant image selectors: a table gained a direct-only constant mode");
     const auto bindings = populate(info);
     require(bindings.size() == 2u && bindings[0].imageUnnormalized == std::vector<bool>{true} && bindings[1].samplerUnnormalized == std::vector<bool>{true}, "unnormalized samplers: an S# without live uses was not flagged");
+    auto shared = info;
+    auto volume = image;
+    volume.dimension = RdnaImageDimension::Dim3D;
+    shared.images.push_back(volume);
+    shared.sampledPairs.push_back({1u, 0u, 0u});
+    snapshot.images.push_back(DescriptorValue{{}, 8u});
+    const auto withNull = populate(shared);
+    require(withNull.size() == 3u && withNull[0].imageUnnormalized == std::vector<bool>{true} && withNull[1].imageUnnormalized == std::vector<bool>{false} && withNull[2].samplerUnnormalized == std::vector<bool>{true}, "unnormalized samplers: a null volume prevented a shared sampler from serving a live 2D image");
+    snapshot.images[1] = snapshot.images[0];
+    snapshot.images[1].dwords[3] = 0xa0000facu;
+    expectFailure([&] { static_cast<void>(populate(shared)); }, "samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a nonnull volume was accepted");
+    snapshot.images.pop_back();
     auto selected = info;
     selected.images[0].table = 0u;
     expectFailure([&] { static_cast<void>(populate(selected)); }, "unnormalized guest sampler samples an image selected at run time, which is not implemented", "unnormalized samplers: an image table root was accepted");
@@ -7126,6 +7141,49 @@ void verifyUnusedUnnormalizedSampler() {
     msaaArraySnapshot.images[0].dwords[5] = 0x00000020u;
     DescriptorBindingBuilder{}.Populate(msaaArrayAllocation, msaaArrayInfo, IrShaderStage::Compute, 0u, msaaArraySnapshot, {});
     require(msaaArrayAllocation.bindings.size() == 1u && msaaArrayAllocation.bindings[0].imageShape == DescriptorImageShape::Image2DMultisampleArray, "multisampled array image resource did not receive Image2DMultisampleArray descriptor shape");
+}
+
+void verifySampleAdjustReservedBits() {
+    using namespace ShaderRecompiler;
+    const auto check = [](std::uint32_t shift, std::uint32_t constant, bool adjust, bool accepted) {
+        IrProgram program;
+        auto& resources = program.Resources();
+        resources.stage = IrShaderStage::Compute;
+        resources.srtPlanComplete = true;
+        MemoryInfo memory;
+        memory.kind = ResourceKind::Image;
+        memory.imageDimension = RdnaImageDimension::Dim2D;
+        memory.imageSampleFlags = adjust ? RdnaImageSampleFlagAdjust : 0u;
+        resources.memoryInfo.push_back(memory);
+        auto& block = program.CreateBlock();
+        program.SetEntryBlock(block);
+        program.BlockOrder().push_back(&block);
+        IrBuilder builder(program);
+        builder.SetInsertionPoint(block);
+        auto& zero = builder.Constant(0u);
+        auto& unknown = builder.Emit(IrOpcode::UndefU32, IrType::U32, {});
+        auto& masked = builder.BitwiseAnd(unknown, builder.Constant(0xffffu));
+        auto& shifted = builder.ShiftLeftLogical(masked, builder.Constant(shift));
+        auto& word = constant == 0u ? shifted : builder.BitwiseOr(shifted, builder.Constant(constant));
+        auto& image = builder.Emit(IrOpcode::GetImageResource, IrType::ImageResource, {&zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero});
+        auto& sampler = builder.Emit(IrOpcode::GetSamplerResource, IrType::SamplerResource, {&builder.Constant(0x36u), &zero, &zero, &word});
+        auto& address = builder.Emit(IrOpcode::MakeImageAddress, IrType::ImageAddress, {&zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero, &zero});
+        static_cast<void>(builder.Emit(IrOpcode::ImageSampleRaw, IrType::U32x4, {&image, &sampler, &address, &builder.ConstantBool(true)}, MemoryFlags{0u, 0u}));
+        if (!accepted) {
+            expectFailure([&] { ResourceTracker{}.Track(program); }, "GetSamplerResource dword 3", "sample adjust removed a meaningful or unrecognized sampler field");
+            return;
+        }
+        ResourceTracker{}.Track(program);
+        require(resources.info.samplers.size() == 1u, "sample adjust lost its sampler");
+        const auto& descriptor = resources.descriptorSources.at(resources.info.samplers[0].source);
+        const auto* result = descriptor.dwords[3]->Resolve();
+        require(result->HasImmediate() && result->ImmediateU32() == constant, "sample adjust did not remove only reserved bits");
+    };
+    check(12u, 0u, true, true);
+    check(14u, 0x80000000u, true, true);
+    check(15u, 0u, true, false);
+    check(0u, 0u, true, false);
+    check(12u, 0u, false, false);
 }
 
 void verifyWaveUniformValues() {
@@ -8624,6 +8682,7 @@ int main(int argc, char** argv) {
         verifyUnnormalizedSamplers();
         verifyUnusedUnnormalizedSampler();
         verifyNullVolumeUnnormalizedSampler();
+        verifySampleAdjustReservedBits();
         verifyWaveUniformValues();
         verifyTwoLaneUniformValues();
         verifyBdaReadFallbackFunctions();
