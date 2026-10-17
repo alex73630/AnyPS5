@@ -8,6 +8,7 @@
 #include "Optimization/RequestMemoryView.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include "Optimization/ResourceTracker.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "Optimization/SrtWalker.hpp"
 #include "Optimization/SrtWalker/SrtDescriptorEvaluation.hpp"
@@ -1069,6 +1070,61 @@ void verifySignedSrtComparison() {
         require(descriptors.size() == 1u && descriptors[0].dwordCount == expected.size(), "signed SRT comparison: descriptor shape changed");
         for (std::size_t index = 0; index < expected.size(); ++index) {
             require(descriptors[0].dwords[index] == expected[index], "signed SRT comparison: signed boundary selected the wrong descriptor dword");
+        }
+    }
+}
+
+void verifyPartialResourceConditions() {
+    using namespace ShaderRecompiler;
+    for (const auto opcode : {IrOpcode::LogicalAnd, IrOpcode::LogicalOr}) {
+        for (const bool reverse : {false, true}) {
+            IrProgram program;
+            auto& plan = program.Resources();
+            plan.srtPlanComplete = true;
+            plan.resourceTrackingComplete = true;
+            std::vector<std::unique_ptr<IrValue>> values;
+            const auto make = [&](IrOpcode op, IrType type, std::initializer_list<IrValue*> arguments = {}) -> IrValue& {
+                auto value = std::make_unique<IrValue>(op, type, static_cast<std::uint32_t>(values.size()));
+                for (auto* argument : arguments) value->AddArgument(argument);
+                values.push_back(std::move(value));
+                return *values.back();
+            };
+            auto& reg = make(IrOpcode::Void, IrType::ScalarReg);
+            reg.SetRegister({RegisterBank::Scalar, 0u});
+            auto& input = make(IrOpcode::GetUserData, IrType::U32, {&reg});
+            auto& zero = make(IrOpcode::Void, IrType::U32);
+            zero.SetImmediateU32(0u);
+            auto& known = make(IrOpcode::INotEqual32, IrType::Bool, {&input, &zero});
+            auto& lane = make(IrOpcode::LaneId, IrType::U32);
+            auto& unknown = make(IrOpcode::IEqual32, IrType::Bool, {&lane, &zero});
+            auto& condition = make(opcode, IrType::Bool, reverse ? std::initializer_list<IrValue*>{&known, &unknown} : std::initializer_list<IrValue*>{&unknown, &known});
+            plan.descriptorSources.resize(2);
+            for (auto& source : plan.descriptorSources) {
+                source.dwordCount = 1u;
+                source.dwords[0] = &zero;
+            }
+            plan.controlFlow.resize(3);
+            plan.controlFlow[0].condition = &condition;
+            plan.controlFlow[0].successors = {1u, 2u};
+            plan.controlFlow[1].sources = {0u};
+            plan.controlFlow[2].sources = {1u};
+            auto extracted = ResourceMaterializer().ExtractPlan(program);
+            require(extracted.controlFlow[0].condition != nullptr, "partial resource condition: extraction discarded the condition");
+            require(!extracted.compact.values.empty(), "partial resource condition: the compact plan was not built");
+            for (const bool compact : {false, true}) {
+                for (const std::uint32_t inputWord : {0u, 1u}) {
+                    const std::array<std::uint32_t, 1> userData{inputWord};
+                    SrtRuntime runtime{userData};
+                    runtime.readSpecializationMemory = +[](void*, std::uint64_t, std::uint32_t*) { return false; };
+                    std::vector<DescriptorValue> descriptors;
+                    std::vector<std::uint32_t> flat;
+                    std::vector<std::uint8_t> active;
+                    require(Detail::EvaluateRuntimeSourcesImpl(compact ? extracted : plan, {}, runtime, descriptors, flat, true, {}, active), "partial resource condition: evaluation failed");
+                    const bool decisive = (opcode == IrOpcode::LogicalOr) == (inputWord != 0u);
+                    const std::vector<std::uint8_t> expected = decisive ? std::vector<std::uint8_t>{static_cast<std::uint8_t>(inputWord), static_cast<std::uint8_t>(1u - inputWord)} : std::vector<std::uint8_t>{1u, 1u};
+                    require(active == expected, "partial resource condition: the wrong branch resources were activated");
+                }
+            }
         }
     }
 }
@@ -8514,6 +8570,7 @@ int main(int argc, char** argv) {
         verifyFrontendPair();
         verifyLayoutPair();
         verifySignedSrtComparison();
+        verifyPartialResourceConditions();
         verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();

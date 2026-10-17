@@ -441,10 +441,12 @@ bool BasicEvaluator<TNode>::MayEvaluate(const IrResourcePlan& program, IrValue* 
             }
             continue;
         }
-        known.emplace(current, std::ranges::all_of(required, [&known](const IrValue* argument) {
+        const auto evaluable = [&known](const IrValue* argument) {
             const auto found = argument != nullptr ? known.find(argument) : known.end();
             return found != known.end() && found->second;
-        }));
+        };
+        const bool partial = current->Opcode() == IrOpcode::LogicalAnd || current->Opcode() == IrOpcode::LogicalOr;
+        known.emplace(current, partial ? std::ranges::any_of(required, evaluable) : std::ranges::all_of(required, evaluable));
     }
     return known.at(value->Resolve());
 }

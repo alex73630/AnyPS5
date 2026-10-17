@@ -738,7 +738,7 @@ bool forwardsWord(const IrUse& use) {
     return use.user->Opcode() == IrOpcode::Identity || use.user->Opcode() == IrOpcode::Phi || (use.user->Opcode() == IrOpcode::SelectU32 && use.operand != 0u);
 }
 
-void collectReaders(IrValue& value, std::vector<IrUse>& readers) {
+void collectReaders(IrValue& value, std::vector<IrUse>& readers, bool forwardWords = true) {
     std::unordered_set<const IrValue*> visited{&value};
     std::vector<std::pair<std::vector<IrUse>, std::size_t>> pending;
     pending.emplace_back(value.OperandUses(), 0u);
@@ -749,7 +749,7 @@ void collectReaders(IrValue& value, std::vector<IrUse>& readers) {
             continue;
         }
         const IrUse use = uses[next++];
-        if (!forwardsWord(use)) {
+        if (!(forwardWords ? forwardsWord(use) : use.user->Opcode() == IrOpcode::Identity)) {
             readers.push_back(use);
         } else if (visited.insert(use.user).second) {
             pending.emplace_back(use.user->OperandUses(), 0u);
@@ -821,16 +821,8 @@ void lowerPackedAncillary(IrProgram& program, IrBuilder& builder, IrValue& ancil
     const bool whole = std::ranges::all_of(readers, extractsField);
     if (!whole) {
         std::vector<IrUse> extracts;
-        const auto collectExtracts = [&](const auto& self, IrValue& value) -> void {
-            for (const IrUse& use : value.OperandUses()) {
-                if (use.user->Opcode() == IrOpcode::Identity) {
-                    self(self, *use.user);
-                } else if (extractsField(use)) {
-                    extracts.push_back(use);
-                }
-            }
-        };
-        collectExtracts(collectExtracts, ancillary);
+        collectReaders(ancillary, extracts, false);
+        std::erase_if(extracts, [&](const IrUse& use) { return !extractsField(use); });
         direct = std::move(extracts);
         forwarded.clear();
     }

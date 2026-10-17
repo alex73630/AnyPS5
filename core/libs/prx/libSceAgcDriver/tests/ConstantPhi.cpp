@@ -1,4 +1,5 @@
 #include "IntermediateRepresentation/IrBuilder.hpp"
+#include "IntermediateRepresentation/IrMetadata/StageIO.hpp"
 #include "Optimization/ConstantFolder.hpp"
 #include "Optimization/DeadCodeEliminator.hpp"
 #include <cstdio>
@@ -198,6 +199,50 @@ void CheckLongAncillaryForwarding() {
     Require(run.error.empty(), "long ancillary forwarding: folding failed");
 }
 
+void CheckDeepAncillary(bool whole) {
+    IrProgram program;
+    program.Resources().stage = IrShaderStage::Pixel;
+    auto& block = program.CreateBlock();
+    program.SetEntryBlock(block);
+    program.BlockOrder().push_back(&block);
+    IrBuilder builder(program);
+    builder.SetInsertionPoint(block);
+    auto& ancillary = builder.Emit(IrOpcode::GetBuiltin, IrType::U32, {&builder.Constant(static_cast<std::uint32_t>(StageInputKind::PackedAncillary)), &builder.Constant(0u)});
+    auto& uses = program.CreateBlock();
+    program.BlockOrder().push_back(&uses);
+    builder.SetInsertionPoint(uses);
+    const auto identity = [&](IrValue& source) -> IrValue& {
+        auto& value = program.CreateValue(IrOpcode::Identity, IrType::U32);
+        value.AddArgument(&source);
+        uses.AppendInstruction(&value);
+        return value;
+    };
+    auto& first = identity(ancillary);
+    auto& condition = builder.Emit(IrOpcode::UndefU1, IrType::Bool, {});
+    IrValue* tail = &first;
+    for (std::uint32_t index = 0; index < 50000u; ++index) {
+        tail = whole ? &builder.Emit(IrOpcode::SelectU32, IrType::U32, {&condition, tail, tail}) : &identity(*tail);
+    }
+    auto& extract = builder.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {tail, &builder.Constant(8u), &builder.Constant(4u)});
+    if (whole) {
+        auto& phi = builder.Emit(IrOpcode::Phi, IrType::U32, {});
+        phi.AddPhiOperand(&block, tail);
+        first.ReplaceArgument(0u, &phi);
+        phi.AddPhiOperand(&block, &ancillary);
+    } else {
+        static_cast<void>(builder.Emit(IrOpcode::ReferenceU32, IrType::Void, {tail}));
+    }
+    IrBlock* selected = &block;
+    ConstantFolder{}.Fold(program, std::span<IrBlock* const>(&selected, 1u));
+    if (whole) {
+        Require(ancillary.OperandUses().empty(), "deep ancillary forwarding retained the packed input");
+        Require(extract.Argument(0) == tail && extract.Argument(1)->ImmediateU32() == 8u, "deep ancillary forwarding changed a downstream field extraction");
+    } else {
+        Require(extract.Argument(0)->Resolve()->Opcode() == IrOpcode::GetBuiltin && extract.Argument(0)->Resolve()->Argument(0)->ImmediateU32() == static_cast<std::uint32_t>(StageInputKind::SampleId), "deep ancillary direct extraction lost its sample ID");
+        Require(extract.Argument(1)->ImmediateU32() == 0u && first.Argument(0) == &ancillary, "deep ancillary direct extraction changed a whole-word reader");
+    }
+}
+
 }
 
 int main() {
@@ -205,6 +250,8 @@ int main() {
         for (unsigned mode = 0; mode < 5u; ++mode) CheckDiamond(mode);
         CheckLongAncillaryForwarding();
         CheckUnobservedPhiCycles();
+        CheckDeepAncillary(true);
+        CheckDeepAncillary(false);
         std::puts("constant phi dominance tests passed");
         return 0;
     } catch (const std::exception& error) {
