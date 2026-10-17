@@ -54,6 +54,8 @@ public:
     explicit VulkanDevice(const PresentationWindow* window = nullptr);
     struct CompileOnly {};
     explicit VulkanDevice(CompileOnly);
+    struct PipelineWarmup {};
+    explicit VulkanDevice(PipelineWarmup);
     ComputePipelineReplayResult ReplayComputePipeline(const ComputePipelineCapture& capture, std::span<const std::byte> initialCache = {});
     // Builds the pipeline of a journaled compute result ahead of its first dispatch (the journal
     // replay's hook, on its threads): false when the device already holds a pipeline for the module.
@@ -368,7 +370,7 @@ public:
     bool copyWaitsOnCompletions(std::uint64_t address, std::size_t bytes) const;
 
 private:
-    VulkanDevice(const PresentationWindow* window, bool compileOnly);
+    VulkanDevice(const PresentationWindow* window, bool compileOnly, bool loadHeadlessCache = false);
     friend struct VulkanDeviceTestAccess;
     VkPipeline splitComputePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, ComputePipelineObjects& objects, const std::array<std::uint32_t, 3>& base);
     ShaderRecompiler::SpirvTarget buildTarget() const;

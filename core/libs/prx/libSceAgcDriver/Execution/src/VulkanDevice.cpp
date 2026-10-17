@@ -1100,7 +1100,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : VulkanDevice(wind
 
 VulkanDevice::VulkanDevice(CompileOnly) : VulkanDevice(nullptr, true) {}
 
-VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) : state(std::make_unique<State>()), serial([] { static std::atomic<std::uint64_t> serials{0}; return serials.fetch_add(1, std::memory_order_relaxed) + 1; }()) {
+VulkanDevice::VulkanDevice(PipelineWarmup) : VulkanDevice(nullptr, false, true) {}
+
+VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly, bool loadHeadlessCache) : state(std::make_unique<State>()), serial([] { static std::atomic<std::uint64_t> serials{0}; return serials.fetch_add(1, std::memory_order_relaxed) + 1; }()) {
     state->compileOnly = compileOnly;
     APS5_LOG_OUT("VulkanDevice constructor window=%p", static_cast<const void*>(window));
 #ifdef _WIN32
@@ -2139,7 +2141,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     Graphics::PrepareImportWatch(graphicsContext());
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->emptyBuffer = std::make_unique<Graphics::Buffer>(graphicsContext(), Graphics::EmptyBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    state->pipelineCache = std::make_unique<Graphics::PipelineCache>(graphicsContext(), state->properties, window != nullptr || compileOnly);
+    state->pipelineCache = std::make_unique<Graphics::PipelineCache>(graphicsContext(), state->properties, window != nullptr || loadHeadlessCache);
     state->detiler = std::make_unique<Graphics::TextureDetiler>(graphicsContext());
     state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
     state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
