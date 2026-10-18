@@ -1,11 +1,14 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "VulkanTestDevice.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -13,7 +16,9 @@
 #include <exception>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -231,6 +236,44 @@ void RetainedPixelCacheTransitions() {
     Require(after.verifyDecodeMismatches == before.verifyDecodeMismatches && after.facadeMismatches == before.facadeMismatches, "cached pixel transitions disagreed with fresh decoding");
 }
 
+void CaptureOnlyWaitsForTheWordsItReads() {
+    using AgcDriver::DriverDetail::DrawPipeline;
+    if (DrawPipeline::Depth() == 0) return;
+    alignas(4096) static std::array<std::array<float, 1024>, 2> pages{};
+    static_cast<void>(BrightestColorByte());
+    for (std::size_t round = 0; round < pages.size(); ++round) {
+        auto* page = pages[round].data();
+        page[0] = 0.25f;
+        const bool overlaps = round != 0;
+        const auto index = overlaps ? 0u : 256u;
+        const auto written = reinterpret_cast<std::uint64_t>(page + index);
+        auto released = std::make_shared<std::atomic<bool>>(false);
+        struct Release {
+            std::shared_ptr<std::atomic<bool>> released;
+            ~Release() { released->store(true, std::memory_order_release); }
+        } release{released};
+        auto& pipeline = DrawPipeline::Queue0();
+        const auto before = DrawPipeline::DrainRequestsByOpcode(0x100);
+        pipeline.Enqueue([released, page, index] {
+            while (!released->load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            page[index] = 1.0f;
+        }, {{written, written + sizeof(float)}});
+        const auto address = reinterpret_cast<std::uint64_t>(page);
+        const std::vector<std::vector<std::uint32_t>> words{{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u)}};
+        auto commands = Draws(32.0f, TriangleVertexCode.data(), 0, ConstantPixelCode.data(), 2, words);
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, "the pending capture submission failed");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (DrawPipeline::QueuedItems() < 2 && DrawPipeline::DrainRequestsByOpcode(0x100) == before && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const bool queued = DrawPipeline::QueuedItems() >= 2;
+        const bool drained = DrawPipeline::DrainRequestsByOpcode(0x100) > before;
+        released->store(true, std::memory_order_release);
+        AgcDriverWaitIdle_nid_postfix();
+        Require(overlaps ? drained && !queued : queued, overlaps ? "a capture did not wait for the queued write to its word" : "a capture waited for an unrelated queued write on the same page");
+        Require(BrightestColorByte() == (overlaps ? 255u : 64u), "a capture used a stale word or read the unrelated queued write");
+    }
+}
+
 void SightingsKeepCollidingKeys() {
     DrawKeySightings sightings(DrawKeySightings::Ways);
     Require(!sightings.SeenBefore(0) && sightings.SeenBefore(0), "draw key 0 was not admitted at its second sight");
@@ -260,6 +303,7 @@ int main() {
             UserDataDrawsReuseTheirShape(libraries);
             StageDataHitsRefreshTheirWords(libraries);
             RetainedPixelCacheTransitions();
+            CaptureOnlyWaitsForTheWordsItReads();
         }
         AgcDriverShutdown_nid_postfix();
         Require(AgcDriver::Graphics::PipelineLibraryWorkers() == 0, "the driver's shutdown left the pipeline library worker running");
