@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -169,6 +170,13 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
     };
     const std::array<const Key*, 4> partKeys{&keys.vertexInput, &keys.preRasterization, &keys.fragmentShader, &keys.fragmentOutput};
+    constexpr std::array<const char*, 4> partTimers{
+        "Vulkan.GraphicsPipelineLibrary.vertex-input",
+        "Vulkan.GraphicsPipelineLibrary.pre-rasterization",
+        "Vulkan.GraphicsPipelineLibrary.fragment-shader",
+        "Vulkan.GraphicsPipelineLibrary.fragment-output",
+    };
+    const auto* source = PipelineJournalReplaying() ? "journal" : partsOnly ? "registration" : "draw";
     const Key none;
     VkPipelineRenderingCreateInfoKHR shaderRendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
     shaderRendering.viewMask = rendering.viewMask;
@@ -190,6 +198,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             continue;
         }
         PerformanceTimer timing("Vulkan.GraphicsPipelineLibrary");
+        PerformanceTimer partTiming(partTimers[part]);
         VkGraphicsPipelineLibraryCreateInfoEXT library{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, flags[part] == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT ? &rendering : &shaderRendering};
         library.flags = flags[part];
         VkGraphicsPipelineCreateInfo create{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &library};
@@ -230,12 +239,14 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VkResult created;
         {
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
-            created = PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &handle));
+            created = PipelineCompilation{partTimers[part], source}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &handle));
         }
         lock.lock();
         Check(created, "vkCreateGraphicsPipelines library");
         if (const auto raced = cache.find(key); raced != cache.end()) {
             device.destroyPipeline(context.device, handle, nullptr);
+            static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+            if (profile) ProfilePrint_nid_no_patch("[pipeline-duplicate] kind=%s source=%s\n", partTimers[part], source);
             libraries.push_back(raced->second);
             continue;
         }
@@ -277,7 +288,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
     lock.unlock();
     {
         auto pipelineCacheLock = context.LockPipelineCacheForUse();
-        Check(PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &pipeline)), "vkCreateGraphicsPipelines link");
+        Check(PipelineCompilation{"Vulkan.GraphicsPipelineLink", source}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &pipeline)), "vkCreateGraphicsPipelines link");
     }
     lock.lock();
     ++device.counters.linked;
@@ -306,7 +317,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             VkPipeline result = VK_NULL_HANDLE;
             const auto pipelineCreationResult = [&] {
                 auto pipelineCacheLock = cacheSynchronization != nullptr ? cacheSynchronization->LockForPipelineUse() : PipelineCacheSynchronization::PipelineUseLock{};
-                return PipelineCompilation{}.Complete(createPipelines(slot->device, cache, 1, &create, nullptr, &result));
+                return PipelineCompilation{"Vulkan.GraphicsPipelineLink.optimized", "background"}.Complete(createPipelines(slot->device, cache, 1, &create, nullptr, &result));
             }();
             if (pipelineCreationResult != VK_SUCCESS) return;
             slot->handle.store(result);

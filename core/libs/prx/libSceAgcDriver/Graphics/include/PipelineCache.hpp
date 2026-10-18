@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_PIPELINECACHE_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +23,7 @@ struct PipelineCompilationCounters {
 
 class PipelineCompilation {
 public:
-    PipelineCompilation();
+    explicit PipelineCompilation(const char* kind = "unspecified", const char* source = "runtime");
     ~PipelineCompilation();
     PipelineCompilation(const PipelineCompilation&) = delete;
     PipelineCompilation& operator=(const PipelineCompilation&) = delete;
@@ -31,6 +32,9 @@ public:
 
 private:
     bool succeeded = false;
+    const char* kind;
+    const char* source;
+    std::chrono::steady_clock::time_point start{};
 };
 
 class PipelineCache {

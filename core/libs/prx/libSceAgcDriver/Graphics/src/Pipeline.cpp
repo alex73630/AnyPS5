@@ -293,13 +293,22 @@ void appendKey(std::vector<std::byte>& key, const TValue& value) {
     key.insert(key.end(), bytes.begin(), bytes.end());
 }
 
-bool libraryKeys(PipelineLibraryKeys& keys, const Context& context, const State& state, const VertexInputLayout& input, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders) {
+bool libraryKeys(PipelineLibraryKeys& keys, const Context& context, const State& state, const VertexInputLayout& input, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders, const char*& fallback) {
     using Stage = ShaderRecompiler::ShaderStage;
-    if (!context.graphicsPipelineLibrary || context.pipelineExecutableInfo || state.depthBiasPerFace || state.rectList || BarycentricPatches(state, shaders) || SplitsAlternateAlpha(state) || std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->functionLdsBuffer; }) || FragmentInterlock(shaders)) return false;
+    const auto reject = [&](const char* reason) { fallback = reason; return false; };
+    if (!context.graphicsPipelineLibrary) return reject("Vulkan.GraphicsPipelineMonolithic.library-disabled");
+    if (context.pipelineExecutableInfo) return reject("Vulkan.GraphicsPipelineMonolithic.executable-statistics");
+    if (state.depthBiasPerFace) return reject("Vulkan.GraphicsPipelineMonolithic.per-face-depth-bias");
+    if (state.rectList) return reject("Vulkan.GraphicsPipelineMonolithic.rect-list");
+    if (BarycentricPatches(state, shaders)) return reject("Vulkan.GraphicsPipelineMonolithic.barycentric-patches");
+    if (SplitsAlternateAlpha(state)) return reject("Vulkan.GraphicsPipelineMonolithic.alternate-alpha");
+    if (std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->functionLdsBuffer; })) return reject("Vulkan.GraphicsPipelineMonolithic.function-lds-buffer");
+    if (FragmentInterlock(shaders)) return reject("Vulkan.GraphicsPipelineMonolithic.fragment-interlock");
     keys = {};
     for (const auto& shader : shaders) {
         const auto identity = shader.program->Identity();
-        if (shader.stage == Stage::Geometry || identity.Empty()) return false;
+        if (shader.stage == Stage::Geometry) return reject("Vulkan.GraphicsPipelineMonolithic.geometry");
+        if (identity.Empty()) return reject("Vulkan.GraphicsPipelineMonolithic.empty-identity");
         auto& key = shader.stage == Stage::Fragment ? keys.fragmentShader : keys.preRasterization;
         appendKey(key, shader.stage);
         appendKey(key, identity.low);
@@ -580,7 +589,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         viewports.viewportCount = 1;
         viewports.scissorCount = 1;
         PipelineLibraryKeys keys;
-        libraries = libraryKeys(keys, context, state, vertexInput, resources, shaders);
+        const char* fallback = nullptr;
+        libraries = libraryKeys(keys, context, state, vertexInput, resources, shaders, fallback);
         std::vector<VkDynamicState> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         if (state.stencilReplayReference) dynamicStates.push_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
         if (depthBounds) dynamicStates.push_back(VK_DYNAMIC_STATE_DEPTH_BOUNDS);
@@ -693,18 +703,19 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         }
         if (libraries) pipeline = LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, false, _modules);
         else {
+            PerformanceTimer monolithicTiming(fallback);
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
-            Check(PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline)), "vkCreateGraphicsPipelines");
+            Check(PipelineCompilation{fallback, PipelineJournalReplaying() ? "journal" : "draw"}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline)), "vkCreateGraphicsPipelines");
         }
         if (alternateAlpha) {
             blend.pAttachments = secondChannels.data();
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
-            Check(PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &secondChannel)), "vkCreateGraphicsPipelines");
+            Check(PipelineCompilation{"Vulkan.GraphicsPipelineMonolithic.second-channel", PipelineJournalReplaying() ? "journal" : "draw"}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &secondChannel)), "vkCreateGraphicsPipelines");
         }
         if (state.depthBiasPerFace) {
             raster.cullMode = VK_CULL_MODE_FRONT_BIT;
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
-            Check(PipelineCompilation{}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &backFaces)), "vkCreateGraphicsPipelines");
+            Check(PipelineCompilation{"Vulkan.GraphicsPipelineMonolithic.back-faces", PipelineJournalReplaying() ? "journal" : "draw"}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &backFaces)), "vkCreateGraphicsPipelines");
         }
         for (const auto module : _modules) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
         _modules.clear();
@@ -1206,7 +1217,11 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
     {
         std::lock_guard lock(store.mutex);
         bool collision = false;
-        if (auto raced = lookup(collision)) return raced;
+        if (auto raced = lookup(collision)) {
+            static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+            if (profile) ProfilePrint_nid_no_patch("[pipeline-duplicate] kind=Vulkan.GraphicsPipeline source=%s\n", replaying ? "journal" : "draw");
+            return raced;
+        }
         if (collision) {
             ++store.uncached;
             ++store.totals.uncached;

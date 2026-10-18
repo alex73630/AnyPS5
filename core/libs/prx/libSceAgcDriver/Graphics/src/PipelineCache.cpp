@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include "ShaderDiskCache.hpp"
 #include <algorithm>
@@ -40,7 +41,8 @@ std::mutex& pathMutex(const std::filesystem::path& path) {
 
 }
 
-PipelineCompilation::PipelineCompilation() {
+PipelineCompilation::PipelineCompilation(const char* kind, const char* source) : kind(kind), source(source) {
+    if (profiling()) start = std::chrono::steady_clock::now();
     pipelineBuildsActive.fetch_add(1u, std::memory_order_relaxed);
 }
 
@@ -51,6 +53,12 @@ PipelineCompilation::~PipelineCompilation() {
 
 VkResult PipelineCompilation::Complete(VkResult result) {
     succeeded = result == VK_SUCCESS;
+    if (start != std::chrono::steady_clock::time_point{}) {
+        const auto end = std::chrono::steady_clock::now();
+        const auto ms = std::chrono::duration<double, std::milli>(end - start).count();
+        const auto at = std::chrono::duration<double, std::milli>(end.time_since_epoch()).count();
+        ProfilePrint_nid_no_patch("[pipeline-compile] kind=%s source=%s ms=%.3f result=%d at_ms=%.3f\n", kind, source, ms, static_cast<int>(result), at);
+    }
     return result;
 }
 
