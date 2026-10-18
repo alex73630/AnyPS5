@@ -2119,10 +2119,6 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
 }
 
 bool ResourceMaterializer::NullImageDescriptor(const ImageResource& image, const DescriptorValue& descriptor) {
-    return nullImageDescriptor(image, descriptor);
-}
-
-bool ResourceMaterializer::IsNullImage(const ImageResource& image, const DescriptorValue& descriptor) {
     if (descriptor.dwordCount != 8u) throw std::runtime_error("image descriptor must contain eight dwords");
     return nullImageDescriptor(image, descriptor);
 }

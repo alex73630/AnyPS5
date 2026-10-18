@@ -196,7 +196,7 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
         for (const auto& pair : info.sampledPairs) {
             if (pair.sampler != r) continue;
             const auto& image = info.images.at(pair.image);
-            if (image.table == NoTable && ResourceMaterializer::IsNullImage(image, snapshot.images.at(pair.image))) continue;
+            if (image.table == NoTable && ResourceMaterializer::NullImageDescriptor(image, snapshot.images.at(pair.image))) continue;
             if (!image.singleMipPlaneBiasCompatible || image.dimension != RdnaImageDimension::Dim2D) continue;
             const auto mode = ResourceMaterializer::RuntimeImageMode(image, snapshot.images.at(pair.image), info.runtimeImageModes.at(pair.image));
             if (info.runtimeImageModes.at(pair.image).at(mode).dimension != RdnaImageDimension::Dim3D) continue;
@@ -226,7 +226,7 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
             if (base.table != NoTable) {
                 failUnnormalized("samples an image selected at run time");
             }
-            if (ResourceMaterializer::IsNullImage(base, snapshot.images.at(pair.image))) {
+            if (ResourceMaterializer::NullImageDescriptor(base, snapshot.images.at(pair.image))) {
                 if (nullMismatch == nullptr) nullMismatch = ResourceMaterializer::UnnormalizedSampleMismatch(base);
                 continue;
             }
