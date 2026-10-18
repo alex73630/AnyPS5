@@ -472,6 +472,7 @@ public:
     static bool GpuTimingEnabled();
     static bool BatchStampsEnabled();
     std::uint32_t BeginGpuTiming(std::uint64_t key);
+    std::uint32_t BeginDrawGpuTiming(std::uint64_t key, bool fragment = true);
     // `bytes`: what the range moved (a fill's, a copy's), summed per key on the [gputime] line.
     void EndGpuTiming(std::uint32_t index, std::uint64_t bytes = 0);
     // The key of the whole-batch range (first to last command; reported as "batch" on the [gputime]
@@ -594,6 +595,7 @@ private:
         bool segmentActive = false;
         std::uint32_t queuedDumps = 0;
         std::vector<std::uint64_t> timedKeys;
+        std::vector<std::uint8_t> timedDrawKinds;
         std::vector<std::uint64_t> timedBytes;
         // The whole-batch timed range (BatchTimingKey) and its stamps once read (see Completed).
         std::uint32_t batchTiming = NoTiming;

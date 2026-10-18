@@ -7636,7 +7636,7 @@ public:
     CoverPass(const CoverPass&) = delete;
     CoverPass& operator=(const CoverPass&) = delete;
 
-    bool Draw(Recorder& recorder) const {
+    bool Draw(Recorder& recorder, std::uint32_t* timedRange = nullptr) const {
         const auto start = recorder.StartDrawPass(PassKey, false, false, PassAccess{});
         const bool continued = start.continued;
         const auto commands = start.commands;
@@ -7646,7 +7646,9 @@ public:
         }
         context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         recorder.NoteSampledDraw(commands);
+        if (timedRange != nullptr) *timedRange = recorder.BeginDrawGpuTiming(0x100000000ull);
         context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, 3, 1, 0, 0);
+        if (timedRange != nullptr) recorder.EndGpuTiming(*timedRange);
         recorder.LeaveRenderPassOpen(PassKey, Recorder::NoTiming, false, PassAccess{});
         return continued;
     }
@@ -7717,6 +7719,32 @@ private:
     VkShaderModule fragment = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
 };
+
+void gpuDrawTimingTests(Recorder& recorder, const Context& context) {
+    Require(Recorder::GpuTimingEnabled(), "GPU draw timing test requires GPU profiling");
+    CoverPass cover(context);
+    std::uint32_t first = Recorder::NoTiming, second = Recorder::NoTiming;
+    Require(recorder.BeginDrawGpuTiming(1) == Recorder::NoTiming, "timing without an open batch allocated queries");
+    Require(!cover.Draw(recorder, &first), "the first timed draw continued a pass");
+    Require(cover.Draw(recorder, &second), "GPU timing ended the render pass");
+    Require(first != Recorder::NoTiming && second != Recorder::NoTiming && first != second, "timed draws did not reserve distinct ranges");
+    bool exhausted = false;
+    for (std::uint32_t count = 0; count < 16384; ++count) {
+        const auto index = recorder.BeginDrawGpuTiming(0x100000000ull, false);
+        recorder.EndGpuTiming(index);
+        if (index == Recorder::NoTiming) {
+            exhausted = true;
+            break;
+        }
+    }
+    Require(exhausted, "GPU timing did not enforce its query limit");
+    Require(cover.Draw(recorder, &second), "query exhaustion ended the render pass");
+    Require(second == Recorder::NoTiming, "exhausted draw timing allocated another range");
+    recorder.Sync();
+    Require(!cover.Draw(recorder, &first), "the next timing batch continued a pass");
+    Require(first != Recorder::NoTiming, "query exhaustion persisted into another batch");
+    recorder.Sync();
+}
 
 void inPassSampleDumpTests(Recorder& recorder, const Context& context, const CoverPass& cover, std::uint64_t* words, std::uint64_t address, VkDeviceAddress target) {
     const auto samples = [&](std::uint64_t word) { return word & ~SampleReady; };
@@ -10984,6 +11012,11 @@ int main(int argc, char** argv) {
             const auto before = Recorder::StoreCounts().stores;
             storeRunTests(device, recorder);
             return Recorder::StoreCounts().stores != before ? 0 : 77;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--gpu-draw-timing-only") {
+            gpuDrawTimingTests(recorder, device.GetContext());
+            std::cout << "GPU draw timing tests passed\n";
+            return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--copied-direct-only") {
             copiedDirectOrderingTests(device, recorder);

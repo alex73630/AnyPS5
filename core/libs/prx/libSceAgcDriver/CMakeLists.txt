@@ -1495,8 +1495,10 @@ if(BUILD_TESTING)
     add_test(NAME agc_gpu_timing_incomplete COMMAND agc_driver_recorder_tests --gpu-timing-incomplete-only)
     set_tests_properties(agc_gpu_timing_complete agc_gpu_timing_incomplete PROPERTIES
         ENVIRONMENT "APS5_PROFILE_GPU=1" TIMEOUT 15 SKIP_RETURN_CODE 77)
+    add_test(NAME agc_gpu_draw_timing COMMAND agc_driver_recorder_tests --gpu-draw-timing-only)
+    set_tests_properties(agc_gpu_draw_timing PROPERTIES ENVIRONMENT "APS5_PROFILE_GPU=1;APS5_PROFILE_GPU_DRAWS=1" SKIP_RETURN_CODE 77 TIMEOUT 30)
     if(WIN32)
-        set_tests_properties(agc_recorder_device_selection agc_gpu_timing_complete agc_gpu_timing_incomplete PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_recorder_device_selection agc_gpu_timing_complete agc_gpu_timing_incomplete agc_gpu_draw_timing PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_command_memory_reuse COMMAND agc_driver_recorder_tests --command-reuse-only)
