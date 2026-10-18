@@ -218,6 +218,10 @@ void Driver::relocateDrawEntry(const QueueState& queue, std::uint64_t alias, std
             copy->runs = variant->runs;
             copy->runBases = variant->runBases;
             copy->relocatableWords = variant->relocatableWords;
+            copy->tracedUserBases = variant->tracedUserBases;
+            copy->tracedUserValues = variant->tracedUserValues;
+            copy->tracedUserUse = variant->tracedUserUse;
+            copy->tracedRelocationEligible = variant->tracedRelocationEligible;
             copy->words = variant->words;
             copy->forgetSerial = variant->forgetSerial;
             copy->compiled = variant->compiled;
@@ -266,7 +270,8 @@ void Driver::applyShaderDataPatches(DispatchVariant& variant) {
 
 void Driver::reportDrawRelocation() {
     auto& counters = drawRelocationCounters;
-    AgcDriver::ProfilePrint_nid_no_patch("[draw-relocate] %llu alias lookups: %llu donors with moved user words, %llu refusals, %llu hits through a relocated entry; %zu shader sets learned, %zu aliases held (%llu dropped at the limit)\n", static_cast<unsigned long long>(counters.lookups), static_cast<unsigned long long>(counters.donors), static_cast<unsigned long long>(counters.refused), static_cast<unsigned long long>(counters.hits), drawRelocations.size(), drawAliases.size(), static_cast<unsigned long long>(counters.evicted));
+    const auto nonempty = static_cast<std::size_t>(std::count_if(drawRelocations.begin(), drawRelocations.end(), [](const auto& item) { return item.second != nullptr && !item.second->words.empty(); }));
+    AgcDriver::ProfilePrint_nid_no_patch("[draw-relocate] 10 s: %llu alias lookups, %llu donors with moved user words, %llu refusals, %llu hits through a relocated entry; %zu shader sets learned (%zu with relocatable words), %zu aliases held (%llu dropped at the limit)\n", static_cast<unsigned long long>(counters.lookups), static_cast<unsigned long long>(counters.donors), static_cast<unsigned long long>(counters.refused), static_cast<unsigned long long>(counters.hits), drawRelocations.size(), nonempty, drawAliases.size(), static_cast<unsigned long long>(counters.evicted));
     counters = {};
 }
 

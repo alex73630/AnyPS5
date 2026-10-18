@@ -233,6 +233,7 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
                 if (roles[i] == Role::GeometryBack || programs[i].userData.size() != dataEntry->decode->programs[i].userData.size()) continue;
                 const auto& now = programs[i].userData;
                 const auto& was = dataEntry->decode->programs[i].userData;
+                if (now != was && traceDrawCache()) traceDataUserMismatch(programs[i], dataEntry->decode->programs[i], dataEntry->stages[i]);
                 auto& candidates = dataCandidates[i];
                 for (const auto& variant : dataEntry->stages[i]) {
                     bool usedEqual = true;
