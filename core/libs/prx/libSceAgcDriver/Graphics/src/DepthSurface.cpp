@@ -1605,8 +1605,14 @@ bool drawn(const DepthSurface* surface) {
     return std::find(drawnDepths.begin(), drawnDepths.end(), surface) != drawnDepths.end();
 }
 
+bool sameLayeredSlice(const DepthTarget& a, const DepthTarget& b) {
+    return sameSurface(a, b) && a.htileAddress == b.htileAddress && a.htileStencil == b.htileStencil && a.htileDepthOnly == b.htileDepthOnly;
+}
+
 struct LayeredDepth {
     LayeredDepth(const Context& context, const DepthTarget& target, std::vector<DepthSurface*> slices) : context(context), target(target), slices(std::move(slices)), image(this->slices.front()->owned) {
+        Require(image != nullptr, "a layered depth view needs an array image");
+        for (std::size_t i = 0; i < this->slices.size(); ++i) Require(this->slices[i]->owned == image && this->slices[i]->layer == this->slices.front()->layer + i, "a layered depth view needs consecutive layers of one image");
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image->image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
@@ -2089,14 +2095,14 @@ VkImageView layeredDepthView(const Context& context, const DepthTarget& target, 
     std::lock_guard lock(surfacesMutex());
     const auto cleared = takeClearedHtiles(slices);
     auto& groups = layeredDepths();
-    auto found = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group->context.device == context.device && group->slices.size() == layers && sameSurface(group->target, target); });
+    auto found = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group->context.device == context.device && group->slices.size() == layers && sameLayeredSlice(group->target, target); });
     if (found == groups.end()) {
         std::vector<DepthSurface*> owners;
         for (const auto& group : groups) {
             if (group->context.device != context.device || group->slices.size() < layers) continue;
             for (std::size_t first = 0; first <= group->slices.size() - layers; ++first) {
                 const auto begin = group->slices.begin() + first;
-                if (!std::equal(slices.begin(), slices.end(), begin, [](const auto& slice, const auto* surface) { return surface->active->load(std::memory_order_acquire) && sameSurface(slice, surface->target); })) continue;
+                if (!std::equal(slices.begin(), slices.end(), begin, [](const auto& slice, const auto* surface) { return surface->active->load(std::memory_order_acquire) && sameLayeredSlice(slice, surface->target); })) continue;
                 owners.assign(begin, begin + layers);
                 break;
             }
