@@ -225,13 +225,12 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
             if (base.table != NoTable) {
                 failUnnormalized("samples an image selected at run time");
             }
-            if (ResourceMaterializer::IsNullImage(base, snapshot.images.at(pair.image))) continue;
-            const auto& image = info.runtimeImageModes.at(pair.image).at(ResourceMaterializer::RuntimeImageMode(base, snapshot.images.at(pair.image), info.runtimeImageModes.at(pair.image)));
-            const auto* reason = ResourceMaterializer::UnnormalizedSampleMismatch(image);
-            if (reason != nullptr && ResourceMaterializer::NullImageDescriptor(base, snapshot.images.at(pair.image))) {
-                if (nullMismatch == nullptr) nullMismatch = reason;
+            if (ResourceMaterializer::IsNullImage(base, snapshot.images.at(pair.image))) {
+                if (nullMismatch == nullptr) nullMismatch = ResourceMaterializer::UnnormalizedSampleMismatch(base);
                 continue;
             }
+            const auto& image = info.runtimeImageModes.at(pair.image).at(ResourceMaterializer::RuntimeImageMode(base, snapshot.images.at(pair.image), info.runtimeImageModes.at(pair.image)));
+            const auto* reason = ResourceMaterializer::UnnormalizedSampleMismatch(image);
             if (reason != nullptr) {
                 failUnnormalized(reason);
             }
