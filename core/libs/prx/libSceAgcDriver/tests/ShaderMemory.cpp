@@ -1123,6 +1123,11 @@ void verifyPartialResourceConditions() {
                     const bool decisive = (opcode == IrOpcode::LogicalOr) == (inputWord != 0u);
                     const std::vector<std::uint8_t> expected = decisive ? std::vector<std::uint8_t>{static_cast<std::uint8_t>(inputWord), static_cast<std::uint8_t>(1u - inputWord)} : std::vector<std::uint8_t>{1u, 1u};
                     require(active == expected, "partial resource condition: the wrong branch resources were activated");
+                    if (compact) {
+                        const auto* tape = Detail::SrtTape::For(extracted);
+                        require(tape != nullptr && tape->Run(extracted, runtime, descriptors, flat, active), "partial resource condition: the tape refused a complete plan");
+                        require(active == expected, "partial resource condition: the tape selected the wrong branch resources");
+                    }
                 }
             }
         }
