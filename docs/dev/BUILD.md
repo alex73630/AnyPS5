@@ -174,6 +174,8 @@ The tool replays the journal's graphics and compute pipeline recipes without run
 
 Only recorded pipelines can be warmed. Newly encountered draw state still compiles during gameplay, and shader compiler changes invalidate the journal. The normal runtime already replays the journal in parallel during loading. `APS5_PREBUILD_THREADS` separately controls early shader-library builds and defaults to one; it does not parallelize an individual Vulkan pipeline compilation.
 
+`APS5_REGISTRATION_WORD_LIMIT` overrides the maximum SPIR-V word count for a reusable registration module. The default is 200000; 0 forces specialized modules. Larger limits can reduce the number of descriptor-dependent pipeline variants, but each reusable module can take longer to compile and execute. The setting accepts an unsigned 32-bit decimal integer and is part of the shader cache key. Measure cold compilation and warm rendering separately before choosing a limit for a device.
+
 Set `APS5_SHADER_STATUS=1` when launching a title to show shader preparation jobs and Vulkan pipeline builds in the window title. It refreshes four times per second from the window event loop, including when no frames arrive. Preparation counts cover the registration and early-library worker queues. Vulkan counts cover guest graphics pipelines, graphics pipeline libraries, links and compute pipelines, including journal replay and native-cache reuse; they do not count unique shaders or internal texture-transfer helpers. A zero queue does not mean loading is complete: the title discovers additional work during execution. The title bar is hidden in fullscreen mode, and updates pause if presentation itself blocks.
 
 ## Compute pipeline replay
