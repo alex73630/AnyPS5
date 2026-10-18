@@ -1830,6 +1830,10 @@ void Recorder::FlushStores() {
 namespace {
 
 constexpr std::uint32_t MaxTimedRanges = 512;
+std::uint32_t timedRangeLimit() {
+    static const auto limit = std::getenv("APS5_PROFILE_GPU_DRAWS") != nullptr ? 8192u : MaxTimedRanges;
+    return limit;
+}
 constexpr std::size_t CommandClasses = static_cast<std::size_t>(Recorder::CommandClass::Count);
 constexpr const char* CommandClassNames[CommandClasses] = {"dispatch-lead", "dispatch-trail", "indirect-args", "label-run", "fill", "fill-clear", "copy", "staging-in", "staging-out", "draw", "storage-upload", "storage-writeback", "dcc-clear", "dcc-keys", "present-blit", "shadow-publish", "template-refresh"};
 // [barriers] counters by class (relaxed: only reported) and the [gputime] totals, which the
@@ -1853,6 +1857,7 @@ std::atomic<std::uint64_t> timingDropped{0};
 struct TimingTotals { std::uint64_t count = 0; double ms = 0; std::uint64_t bytes = 0; };
 AgcDriver::Mutex timingMutex;
 std::map<std::uint64_t, TimingTotals> timingByKey;
+std::array<std::map<std::uint64_t, TimingTotals>, 2> timingDrawsByKey;
 double timingProgramMs = 0, timingClassMs = 0, timingUnionMs = 0, timingBatchMs = 0;
 std::uint64_t timingBatches = 0;
 
@@ -2015,11 +2020,18 @@ std::uint32_t Recorder::BeginGpuTiming(std::uint64_t key) {
     return beginTiming(key);
 }
 
+std::uint32_t Recorder::BeginDrawGpuTiming(std::uint64_t key, bool fragment) {
+    if (!GpuTimingEnabled() || open == nullptr || open->queries == VK_NULL_HANDLE) return NoTiming;
+    const auto index = beginTiming(key);
+    if (index != NoTiming) open->timedDrawKinds[index] = fragment ? 1 : 2;
+    return index;
+}
+
 std::uint32_t Recorder::beginTiming(std::uint64_t key) {
     const bool full = GpuTimingEnabled();
     if (!full && !(key == BatchTimingKey && BatchStampsEnabled())) return NoTiming;
     const auto commands = open->commands;
-    const std::uint32_t queryCount = full ? MaxTimedRanges * 2 : 2;
+    const std::uint32_t queryCount = full ? timedRangeLimit() * 2 : 2;
     if (open->queries == VK_NULL_HANDLE) {
         if (!full && !sparePools.empty()) {
             open->queries = sparePools.back();
@@ -2041,6 +2053,7 @@ std::uint32_t Recorder::beginTiming(std::uint64_t key) {
     }
     const auto index = static_cast<std::uint32_t>(open->timedKeys.size());
     open->timedKeys.push_back(key);
+    open->timedDrawKinds.push_back(0);
     open->timedBytes.push_back(0);
     // Both stamps wait for everything before them to complete, so the range is the timed work alone
     // (a top-of-pipe stamp is not held back by the barrier that precedes the work).
@@ -2634,6 +2647,14 @@ void Recorder::readGpuTiming(Batch& batch) {
             continue;
         }
         const auto key = batch.timedKeys[i];
+        const auto drawKind = batch.timedDrawKinds[i];
+        if (drawKind != 0) {
+            auto& totals = timingDrawsByKey[drawKind - 1][key];
+            ++totals.count;
+            totals.ms += ns / 1e6;
+            intervals.emplace_back(stamps[i * 2], stamps[i * 2 + 1]);
+            continue;
+        }
         if (key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::Count)) PerformanceTrace::GpuRange(CommandClassNames[key - ClassKey(CommandClass::DispatchLeading)], static_cast<double>(stamps[i * 2]) * period, static_cast<double>(stamps[i * 2 + 1]) * period, batch.traceId);
         auto& totals = timingByKey[key];
         ++totals.count;
@@ -2669,9 +2690,19 @@ void Recorder::readGpuTiming(Batch& batch) {
     }
     std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
     // The first field stays the program sum: the measure scripts match on it.
-    AgcDriver::ProfilePrint_nid_no_patch("[gputime] %.0f ms of GPU time in %llu batches over 10 s (batch %.0f ms first to last command; classes %.0f ms, all ranges %.0f ms, untimed %.0f ms outside every range; %llu presents; %llu ranges dropped at the %u cap); by program:", timingProgramMs, static_cast<unsigned long long>(timingBatches), timingBatchMs, timingClassMs, timingUnionMs, timingBatchMs - timingUnionMs, static_cast<unsigned long long>(presents), static_cast<unsigned long long>(timingDropped.exchange(0, std::memory_order_relaxed)), MaxTimedRanges);
+    AgcDriver::ProfilePrint_nid_no_patch("[gputime] %.0f ms of GPU time in %llu batches over 10 s (batch %.0f ms first to last command; classes %.0f ms, all ranges %.0f ms, untimed %.0f ms outside every range; %llu presents; %llu ranges dropped at the %u cap); by program:", timingProgramMs, static_cast<unsigned long long>(timingBatches), timingBatchMs, timingClassMs, timingUnionMs, timingBatchMs - timingUnionMs, static_cast<unsigned long long>(presents), static_cast<unsigned long long>(timingDropped.exchange(0, std::memory_order_relaxed)), timedRangeLimit());
     for (std::size_t i = 0; i < hot.size() && i < 12; ++i) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx x%llu %.0fms", static_cast<unsigned long long>(hot[i].first), static_cast<unsigned long long>(hot[i].second.count), hot[i].second.ms);
     AgcDriver::ProfilePrint_nid_no_patch("; by class:%s\n", classes.c_str());
+    for (std::size_t kind = 0; kind < timingDrawsByKey.size(); ++kind) {
+        auto& entries = timingDrawsByKey[kind];
+        if (entries.empty()) continue;
+        hot.assign(entries.begin(), entries.end());
+        std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
+        AgcDriver::ProfilePrint_nid_no_patch("[gputime-draw] by %s entry:", kind == 0 ? "fragment" : "pre-rasterization");
+        for (std::size_t i = 0; i < hot.size() && i < 24; ++i) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx x%llu %.2fms (per present %.2fms)", static_cast<unsigned long long>(hot[i].first), static_cast<unsigned long long>(hot[i].second.count), hot[i].second.ms, hot[i].second.ms * perPresent);
+        AgcDriver::ProfilePrint_nid_no_patch("\n");
+        entries.clear();
+    }
     timingByKey.clear();
     timingProgramMs = timingClassMs = timingUnionMs = timingBatchMs = 0;
     timingBatches = 0;
