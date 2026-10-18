@@ -102,6 +102,9 @@ struct DrawEntryCounters {
     std::array<std::uint64_t, 6> registerKeyMissChanges{};
     std::uint64_t differingSameRuns = 0, differingWords = 0, differingRunsChanged = 0;
     std::uint64_t dataHits = 0, dataStagesReused = 0, dataStagesCompiled = 0, dataVerified = 0;
+    std::uint64_t dataUserRejected = 0, dataUserUnknown = 0, dataUserTailChanged = 0, dataUserEligible = 0;
+    std::uint64_t dataUserBaseWords = 0, dataUserValueWords = 0, dataUserForwardedWords = 0, dataUserUnusedWords = 0;
+    std::uint64_t dataUserOnlyUnused = 0, dataUserOnlyBases = 0;
     std::uint64_t stageDataHits = 0, stageDataWords = 0, stageDataVerified = 0, stageDataInserts = 0, stageDataPositions = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };

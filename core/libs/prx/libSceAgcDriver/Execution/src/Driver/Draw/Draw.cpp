@@ -551,7 +551,6 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
                 }
             }
         }
-        if (profile && drawRelocationCounters.lookups >= 100000) reportDrawRelocation();
     }
     if (!userPatches.empty() && !drawHit) {
         auto current = std::make_shared<DrawDecode>(*decode);
