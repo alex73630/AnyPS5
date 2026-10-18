@@ -239,10 +239,12 @@ AddressSpaceStats AddressSpaceCounters();
 
 enum class AddressReuse : std::uint8_t { Reused, NotReusable, InUse, Snapshots, Space, Proof, Imports, Threw, Moved, Count };
 enum class SpaceResumeMiss : std::uint8_t { State, Replaced, Device, Generation, Epoch, Mirrors, Count };
+enum class SnapshotReuseMiss : std::uint8_t { Length, Address, Size, LiveBytes, Backing, CopiedBytes, Count };
 struct AddressReuseStats {
     std::uint64_t proofs = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(AddressReuse::Count)> outcomes{};
     std::array<std::uint64_t, static_cast<std::size_t>(SpaceResumeMiss::Count)> resumeMisses{};
+    std::array<std::uint64_t, static_cast<std::size_t>(SnapshotReuseMiss::Count)> snapshotMisses{};
     std::uint64_t refusedProofNs = 0;
     std::uint64_t reusedHolds = 0;
     std::uint64_t budgetRefusals = 0;

@@ -163,6 +163,7 @@ struct AddressReuseCounts {
     std::atomic<std::uint64_t> proofs{0};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(AddressReuse::Count)> outcomes{};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SpaceResumeMiss::Count)> resumeMisses{};
+    std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SnapshotReuseMiss::Count)> snapshotMisses{};
     std::atomic<std::uint64_t> refusedProofNs{0};
     std::atomic<std::uint64_t> reusedHolds{0};
     std::atomic<std::uint64_t> budgetRefusals{0};
@@ -3319,6 +3320,7 @@ AddressReuseStats AddressReuseCounters() {
     stats.proofs = load(counts.proofs);
     for (std::size_t index = 0; index < stats.outcomes.size(); ++index) stats.outcomes[index] = load(counts.outcomes[index]);
     for (std::size_t index = 0; index < stats.resumeMisses.size(); ++index) stats.resumeMisses[index] = load(counts.resumeMisses[index]);
+    for (std::size_t index = 0; index < stats.snapshotMisses.size(); ++index) stats.snapshotMisses[index] = load(counts.snapshotMisses[index]);
     stats.refusedProofNs = load(counts.refusedProofNs);
     stats.reusedHolds = load(counts.reusedHolds);
     stats.budgetRefusals = load(counts.budgetRefusals);
@@ -5989,22 +5991,29 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferMemory::DirectWr
 }
 
 bool GuestBufferMemory::SameSnapshots(std::span<const GuestMemorySnapshot> snapshots) const {
-    if (snapshots.size() != snapshotUses.size()) return false;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    const auto miss = [](SnapshotReuseMiss reason) {
+        if (profile) ReuseCounts().snapshotMisses[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
+        return false;
+    };
+    if (snapshots.size() != snapshotUses.size()) return miss(SnapshotReuseMiss::Length);
     for (std::size_t index = 0; index < snapshots.size(); ++index) {
         const auto& snapshot = snapshots[index];
         const auto& use = snapshotUses[index];
-        if (snapshot.address != use.address || snapshot.bytes.size() != use.bytes) return false;
+        if (snapshot.address != use.address) return miss(SnapshotReuseMiss::Address);
+        if (snapshot.bytes.size() != use.bytes) return miss(SnapshotReuseMiss::Size);
         if (use.live) {
-            if (liveSnapshotCompared(snapshot.address, snapshot.bytes.size()) && std::memcmp(reinterpret_cast<const void*>(snapshot.address), snapshot.bytes.data(), snapshot.bytes.size()) != 0) return false;
+            if (liveSnapshotCompared(snapshot.address, snapshot.bytes.size()) && std::memcmp(reinterpret_cast<const void*>(snapshot.address), snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::LiveBytes);
             continue;
         }
         const auto found = std::upper_bound(regions.begin(), regions.end(), snapshot.address, [](std::uint64_t value, const Region& region) { return value < region.begin; });
-        if (found == regions.begin()) return false;
+        if (found == regions.begin()) return miss(SnapshotReuseMiss::Backing);
         const auto& region = *std::prev(found);
-        if (region.buffer == nullptr || region.direct != nullptr || region.mirror != nullptr || snapshot.address + snapshot.bytes.size() > region.end) return false;
+        if (region.buffer == nullptr || region.direct != nullptr || region.mirror != nullptr || snapshot.address + snapshot.bytes.size() > region.end) return miss(SnapshotReuseMiss::Backing);
         const auto bytes = region.buffer->Bytes();
         const auto offset = static_cast<std::size_t>(snapshot.address - region.begin);
-        if (offset + snapshot.bytes.size() > bytes.size() || std::memcmp(bytes.data() + offset, snapshot.bytes.data(), snapshot.bytes.size()) != 0) return false;
+        if (offset + snapshot.bytes.size() > bytes.size()) return miss(SnapshotReuseMiss::Backing);
+        if (std::memcmp(bytes.data() + offset, snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::CopiedBytes);
     }
     return true;
 }
