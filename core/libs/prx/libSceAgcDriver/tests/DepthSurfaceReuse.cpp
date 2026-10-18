@@ -464,6 +464,16 @@ void RunDepthSurfaceReuseTests() {
         }
         Require(DepthSurfaceView(layered, target, 4) == whole, "binding a subset must preserve the complete array view");
         Require(createdImages.size() == before + 1u && imageCopies.empty(), "switching between contained depth views must neither allocate nor copy images");
+        for (std::uint32_t change = 0; change < 3u; ++change) {
+            auto metadata = subset(0u, 3u);
+            if (change == 0u) metadata.htileAddress = 0x93000000;
+            if (change == 1u) metadata.htileStencil = true;
+            if (change == 2u) metadata.htileDepthOnly = true;
+            const auto allocations = createdImages.size();
+            const auto view = DepthSurfaceView(layered, metadata, 3);
+            Require(imageViews.at(view).image != image && createdImages.size() == allocations + 1u, "different HTILE metadata must not reuse an exact or containing depth array");
+            Require(DepthSurfaceView(layered, metadata, 3) == view, "a depth array with matching HTILE metadata must retain its view");
+        }
         auto changedStencil = subset(1u, 2u);
         changedStencil.stencilAddress += 0x1000000;
         Require(imageViews.at(DepthSurfaceView(layered, changedStencil, 2)).image != image, "a different stencil pairing must not reuse a containing depth array");
