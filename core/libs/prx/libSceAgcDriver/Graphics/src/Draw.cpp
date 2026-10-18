@@ -783,7 +783,9 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     }
     if (reuseCount(AddressReuse::Snapshots) != 0) {
         const auto snapshotMiss = [&](SnapshotReuseMiss kind) { return static_cast<unsigned long long>(reuse.snapshotMisses[static_cast<std::size_t>(kind)] - reuseSeen.snapshotMisses[static_cast<std::size_t>(kind)]); };
-        std::fprintf(stderr, "[rescache] address snapshot refusals: count %llu, address %llu, size %llu, live bytes %llu, backing %llu, copied bytes %llu\n", snapshotMiss(SnapshotReuseMiss::Length), snapshotMiss(SnapshotReuseMiss::Address), snapshotMiss(SnapshotReuseMiss::Size), snapshotMiss(SnapshotReuseMiss::LiveBytes), snapshotMiss(SnapshotReuseMiss::Backing), snapshotMiss(SnapshotReuseMiss::CopiedBytes));
+        const auto liveAddress = snapshotMiss(SnapshotReuseMiss::LiveAddress);
+        const auto copiedAddress = snapshotMiss(SnapshotReuseMiss::CopiedAddress);
+        std::fprintf(stderr, "[rescache] address snapshot refusals: count %llu, address %llu (old live %llu, old copied %llu), size %llu, live bytes %llu, backing %llu, copied bytes %llu\n", snapshotMiss(SnapshotReuseMiss::Length), liveAddress + copiedAddress, liveAddress, copiedAddress, snapshotMiss(SnapshotReuseMiss::Size), snapshotMiss(SnapshotReuseMiss::LiveBytes), snapshotMiss(SnapshotReuseMiss::Backing), snapshotMiss(SnapshotReuseMiss::CopiedBytes));
     }
     profile.reuseSeen = reuse;
     profile.leaseSeen = leases;

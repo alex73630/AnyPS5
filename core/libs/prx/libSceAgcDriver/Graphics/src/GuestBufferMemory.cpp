@@ -6000,7 +6000,7 @@ bool GuestBufferMemory::SameSnapshots(std::span<const GuestMemorySnapshot> snaps
     for (std::size_t index = 0; index < snapshots.size(); ++index) {
         const auto& snapshot = snapshots[index];
         const auto& use = snapshotUses[index];
-        if (snapshot.address != use.address) return miss(SnapshotReuseMiss::Address);
+        if (snapshot.address != use.address) return miss(use.live ? SnapshotReuseMiss::LiveAddress : SnapshotReuseMiss::CopiedAddress);
         if (snapshot.bytes.size() != use.bytes) return miss(SnapshotReuseMiss::Size);
         if (use.live) {
             if (liveSnapshotCompared(snapshot.address, snapshot.bytes.size()) && std::memcmp(reinterpret_cast<const void*>(snapshot.address), snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::LiveBytes);
