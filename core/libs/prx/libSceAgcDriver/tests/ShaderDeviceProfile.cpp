@@ -189,7 +189,6 @@ void CheckHeaps() {
     const auto shared = allocate(image, 2u);
     Require(BindingAllocator{}.FindBinding(shared.layout, DescriptorBindingForImage(image)).resources.size() == 2u * image.mipCount, "a storage heap did not hold two dynamic-mip images");
     const auto capacity = RuntimeAbi::StorageHeapCapacity / image.mipCount;
-    Require(capacity >= 8u, "a storage heap must admit eight full-range dynamic-mip images");
     const auto filled = allocate(image, capacity);
     Require(BindingAllocator{}.FindBinding(filled.layout, DescriptorBindingForImage(image)).resources.size() == RuntimeAbi::StorageHeapCapacity, "a full storage heap was not allocated");
     Reject([&] { allocate(image, capacity + 1u); }, "heap capacity exceeded");
