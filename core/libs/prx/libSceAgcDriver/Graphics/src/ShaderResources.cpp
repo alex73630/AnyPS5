@@ -19,6 +19,7 @@
 #include <mutex>
 #include <array>
 #include <chrono>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -604,7 +605,16 @@ std::uint64_t forcedCacheBudget() {
 }
 
 std::uint64_t storageBudget(const Context& context, std::uint64_t required = 0) {
-    const auto forced = forcedCacheBudget();
+    static const std::uint64_t storageOverride = [] {
+        const char* text = std::getenv("APS5_STORAGE_CACHE_MIB");
+        if (text == nullptr || *text == '\0') return std::uint64_t{0};
+        std::uint64_t mib = 0;
+        const auto* end = text + std::strlen(text);
+        const auto parsed = std::from_chars(text, end, mib);
+        Require(parsed.ec == std::errc{} && parsed.ptr == end && mib <= (std::numeric_limits<std::uint64_t>::max() >> 20u), "APS5_STORAGE_CACHE_MIB must be an unsigned integer in MiB within the 64-bit byte range");
+        return mib << 20u;
+    }();
+    const auto forced = storageOverride != 0 ? storageOverride : forcedCacheBudget();
     if (forced != 0) return forced;
     if (context.memoryProperties2 == nullptr || context.physical == VK_NULL_HANDLE) return TextureCacheBudget(context.memory);
     static struct {

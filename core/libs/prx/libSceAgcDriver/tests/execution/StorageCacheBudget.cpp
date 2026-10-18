@@ -135,11 +135,29 @@ int RetainedBatch() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--retained-batch") return RetainedBatch();
+        const std::string mode = argc > 1 ? argv[1] : "";
+        const auto setBudget = [](const char* name, const char* value) {
 #ifdef _WIN32
-        Require(_putenv_s("APS5_TEXTURE_CACHE_MIB", "32") == 0, "cannot set the test cache budget");
+            Require(_putenv_s(name, value) == 0, "cannot set the test cache budget");
 #else
-        Require(setenv("APS5_TEXTURE_CACHE_MIB", "32", 1) == 0, "cannot set the test cache budget");
+            Require(setenv(name, value, 1) == 0, "cannot set the test cache budget");
 #endif
+        };
+        setBudget("APS5_TEXTURE_CACHE_MIB", mode == "--separate-budget" ? "1" : "32");
+        if (mode == "--separate-budget") setBudget("APS5_STORAGE_CACHE_MIB", "32");
+        if (mode == "--zero-storage-budget") setBudget("APS5_STORAGE_CACHE_MIB", "0");
+        if (mode == "--invalid-storage-budget") {
+            Require(argc == 3, "the invalid-budget test needs a value");
+            setBudget("APS5_STORAGE_CACHE_MIB", argv[2]);
+            try {
+                AgcDriver::Graphics::StorageTextureCacheBudget({});
+            } catch (const std::runtime_error& error) {
+                Require(std::string(error.what()).find("APS5_STORAGE_CACHE_MIB must be") != std::string::npos, "the invalid storage budget failed for an unrelated reason");
+                return 0;
+            }
+            throw std::runtime_error("an invalid storage budget was accepted");
+        }
+        Require(AgcDriver::Graphics::StorageTextureCacheBudget({}) == TestBudget, "the storage cache did not select its test budget");
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         const auto budget = TestBudget;
