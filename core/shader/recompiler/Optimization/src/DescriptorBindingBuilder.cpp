@@ -242,7 +242,6 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
             proof.samplersIgnoreCoordinates[r] = true;
             continue;
         }
-        if (nullMismatch != nullptr) failUnnormalized(nullMismatch);
         proof.samplers[r] = true;
     }
     for (std::uint32_t resource = 0; resource < info.images.size(); resource++) {

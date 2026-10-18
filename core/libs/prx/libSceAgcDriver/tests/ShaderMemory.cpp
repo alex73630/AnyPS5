@@ -7019,7 +7019,8 @@ void verifyNullVolumeUnnormalizedSampler() {
     const auto constantAndNull = populate({volume, volume}, {zeroSwizzle, nullDescriptor});
     require(constantAndNull.samplerUnnormalized == std::vector<bool>{false} && constantAndNull.samplerCoordinatesIgnored == std::vector<bool>{true}, "unnormalized samplers: an S# paired with a null 3D T# and a 3D T# whose channels all select constants was refused or kept its unnormalized coordinates");
     expectFailure([&] { static_cast<void>(populate({volume}, {volumeDescriptor})); }, "samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 3D T# was accepted");
-    expectFailure([&] { static_cast<void>(populate({volume, plane}, {nullDescriptor, planeDescriptor})); }, "samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: an S# shared by a null 3D T# and a 2D T# was accepted");
+    const auto mixed = populate({volume, plane}, {nullDescriptor, planeDescriptor});
+    require(mixed.samplerUnnormalized == std::vector<bool>{true} && mixed.samplerCoordinatesIgnored == std::vector<bool>{false}, "unnormalized samplers: a null 3D T# changed the coordinates of a live 2D sample");
 }
 
 void verifyUnusedUnnormalizedSampler() {
