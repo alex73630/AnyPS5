@@ -1186,9 +1186,11 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
         if (!memory) _putenv_s("APS5_TEXTURE_CACHE_MIB", recover ? "16" : "1");
         if (std::getenv("APS5_TEMPLATE_AUDIT_MS") == nullptr) _putenv_s("APS5_TEMPLATE_AUDIT_MS", "250");
+        if (mode == "storage-override") Require(_putenv_s("APS5_STORAGE_CACHE_MIB", "32") == 0, "cannot set the storage cache override");
 #else
         if (!memory) setenv("APS5_TEXTURE_CACHE_MIB", recover ? "16" : "1", 1);
         setenv("APS5_TEMPLATE_AUDIT_MS", "250", 0);
+        if (mode == "storage-override") Require(setenv("APS5_STORAGE_CACHE_MIB", "32", 1) == 0, "cannot set the storage cache override");
 #endif
         std::unique_ptr<Device> device;
         try {
@@ -1221,6 +1223,14 @@ int main(int argc, char** argv) {
         }
         TextureDetiler detiler(context);
         context.detiler = &detiler;
+        if (mode == "storage-override") {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            Require(StorageTextureCacheBudget(context) == (32ull << 20u), "the storage budget override was not applied");
+            Require(SampledTextureCacheBudget(context) == Budget, "the storage override changed the sampled budget");
+            snapshotTests(context);
+            ClearCachedTextures(context.device);
+            return 0;
+        }
         if (resources) {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             if (!resourceCacheTests(context, mode)) return VulkanTestSkipped;
