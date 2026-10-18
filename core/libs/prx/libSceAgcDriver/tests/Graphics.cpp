@@ -1870,6 +1870,14 @@ void DisabledColorTests() {
     queue.context[0x002] = 1u << 26u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "on a surface without mips");
     const auto beforeLayered = queue;
+    Require(thirdSlice.renderLayers == 1u, "a depth view of one slice became layered");
+    queue.context[0x002] = 5u << 13u;
+    queue.context[0x207] = 1u << 18u;
+    const auto cube = AgcDriver::Graphics::DecodeState(queue);
+    Require(!cube.hasColorTarget && cube.depth && cube.depth->address == depthOnly.depth->address && cube.renderLayers == 6u && cube.layerExports == (1u << 18u), "a depth-only layered draw into a depth view of slices 0 to 5 did not render six layers");
+    queue.context[0x207] = 0;
+    const auto unlayeredCube = AgcDriver::Graphics::DecodeState(queue);
+    Require(unlayeredCube.depth && unlayeredCube.renderLayers == 1u && unlayeredCube.layerExports == 0u, "a depth view of six slices without a layer export became layered");
     queue.context[0x002] = 1u | (3u << 13u);
     queue.context[0x207] = 1u << 18u;
     const auto layeredDepth = AgcDriver::Graphics::DecodeState(queue);
@@ -2583,6 +2591,32 @@ void DepthStencilTests() {
     queue.context[0x207] = 1u << 18u;
     const auto layeredSingle = AgcDriver::Graphics::DecodeState(queue);
     Require(layeredSingle.color.address == firstSlice.color.address && layeredSingle.color.arrayAddress == firstSlice.color.address && layeredSingle.color.arrayLastSlice == 1u && layeredSingle.color.layers == 2u && layeredSingle.renderLayers == 2u, "a layered draw into slices 0 to 1 of a surface of one slice did not render them as a two-slice array");
+    {
+        auto layeredDepth = queue;
+        layeredDepth.context[0x200] = 0x36;
+        layeredDepth.context[0x000] = 0;
+        layeredDepth.context[0x010] = 0x80000181;
+        layeredDepth.context[0x011] = 0x20000180;
+        layeredDepth.context[0x012] = 0x100;
+        layeredDepth.context[0x014] = 0x100;
+        layeredDepth.context[0x007] = 0x003f003f;
+        layeredDepth.context[0x00a] = 0;
+        layeredDepth.context[0x00b] = std::bit_cast<std::uint32_t>(1.0f);
+        layeredDepth.context[0x002] = 1u << 13u;
+        const auto withDepth = AgcDriver::Graphics::DecodeState(layeredDepth);
+        Require(withDepth.depth && withDepth.depth->firstSlice == 0u && withDepth.depth->address == 0x10000u && withDepth.renderLayers == 2u && withDepth.color.layers == 2u, "a layered draw into two color slices with a depth view of slices 0 to 1 did not render two depth layers");
+        layeredDepth.context[0x002] = 1u | (2u << 13u);
+        const auto shifted = AgcDriver::Graphics::DecodeState(layeredDepth);
+        Require(shifted.depth && shifted.renderLayers == 2u && shifted.depth->firstSlice == 1u && shifted.depth->address == 0x10000u + AgcDriver::Graphics::DepthSliceBytes(shifted.depth->extent, 2u), "a layered draw with a depth view of slices 1 to 2 did not start its depth layers at slice 1");
+        for (const auto view : {0u, 2u << 13u, 2u | (2u << 13u)}) {
+            layeredDepth.context[0x002] = view;
+            expectFailure([&] { AgcDriver::Graphics::DecodeState(layeredDepth); }, "depth and color targets have different layer counts");
+        }
+        layeredDepth.context[0x002] = 1u << 13u;
+        layeredDepth.context[0x207] = 0;
+        const auto unlayered = AgcDriver::Graphics::DecodeState(layeredDepth);
+        Require(unlayered.depth && unlayered.renderLayers == 1u, "a depth view of two slices without a layer export became layered");
+    }
     queue.context[0x207] = 0;
     const auto sliced = reinterpret_cast<std::uintptr_t>(sliceMemory.data());
     queue.context[0x318] = static_cast<std::uint32_t>(sliced >> 8u);
@@ -9865,8 +9899,15 @@ void unorm10_11_11TargetTests() {
     changed.context[0x31c] |= 1u << 8u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "unsupported color format 6 number type 1");
     changed = queue;
-    changed.context[0x1e0] = 0x40010101u;
     for (std::uint32_t i = 0; i < 4; ++i) changed.context[0x105 + i] = 0;
+    for (const auto replace : {0x40010001u, 0x60050001u}) {
+        changed.context[0x1e0] = replace;
+        const auto replaced = AgcDriver::Graphics::DecodeState(changed);
+        Require(replaced.blends.size() == 1 && !replaced.blends[0].blendEnable && replaced.color.packing == ColorExportPacking::Unorm10_11_11, "a blend that writes the source color into a 10_11_11 unorm target was refused or kept blending");
+    }
+    changed.context[0x1e0] = 0x40010101u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "blending into a 10_11_11 unorm color target");
+    changed.context[0x1e0] = 0x40010005u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "blending into a 10_11_11 unorm color target");
     changed = queue;
     changed.context[0x8e] = 3;
@@ -10343,7 +10384,7 @@ void packedReplaceBlendTests() {
         queue.context[0x1b4] = 2;
         queue.context[0x8e] = 7;
         for (std::uint32_t i = 0; i < 4; ++i) queue.context[0x105 + i] = 0;
-        for (const auto blend : {0x40000001u, 0x60010001u, 0x61000001u, 0x60000001u}) {
+        for (const auto blend : {0x40000001u, 0x60010001u, 0x60050001u, 0x61000001u, 0x60000001u}) {
             queue.context[0x1e0] = blend;
             const auto state = AgcDriver::Graphics::DecodeState(queue);
             Require(!state.blend.blendEnable && !state.blends[0].blendEnable && state.color.packing == packing && state.blend.colorWriteMask == 7u, "a packed RGB replacement did not retain its packing and writes with host blending disabled");
