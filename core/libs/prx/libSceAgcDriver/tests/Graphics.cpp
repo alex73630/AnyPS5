@@ -4934,6 +4934,7 @@ struct MockVulkan {
     std::map<VkPipelineLayout, std::vector<VkPushConstantRange>> pipelineLayoutPushRanges;
     std::map<VkGraphicsPipelineLibraryFlagsEXT, VkPipelineLayout> libraryLayouts;
     std::map<VkGraphicsPipelineLibraryFlagsEXT, VkPipelineCreateFlags> libraryCreateFlags;
+    std::map<VkGraphicsPipelineLibraryFlagsEXT, std::array<VkFormat, 2>> libraryDepthFormats;
     std::uint32_t pipelineCreateCount = 0;
     std::vector<std::array<std::uint32_t, 3>> pipelineSpecializations;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
@@ -5179,6 +5180,9 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineC
     Require(library != nullptr && library->sType == VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, "missing graphics pipeline library description");
     mock.libraryLayouts[library->flags] = infos[0].layout;
     mock.libraryCreateFlags[library->flags] = infos[0].flags;
+    const auto* rendering = static_cast<const VkPipelineRenderingCreateInfoKHR*>(library->pNext);
+    Require(rendering != nullptr && rendering->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR, "missing library rendering state");
+    mock.libraryDepthFormats[library->flags] = {rendering->depthAttachmentFormat, rendering->stencilAttachmentFormat};
     *pipelines = makeHandle<VkPipeline>();
     ++mock.live;
     return VK_SUCCESS;
@@ -7941,6 +7945,18 @@ void pipelineLibrarySetTests() {
         auto before = PipelineLibraryCountersOf(context.device).built;
         prebuild();
         Require(PipelineLibraryCountersOf(context.device).built == before, "identical shader libraries were rebuilt");
+        for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+            state.depth = DepthTarget{0x1000, 0x2000, {16, 16}, format, 1.0f, 0};
+            prebuild();
+            const auto after = PipelineLibraryCountersOf(context.device).built;
+            Require(after[0] == before[0] && after[1] == before[1] && after[2] == before[2], "attachment format change rebuilt a vertex-input or shader library");
+            Require(after[3] == before[3] + 1u, "attachment format change reused an incompatible output library");
+            for (const auto part : {VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT}) {
+                Require(mock.libraryDepthFormats.at(part) == std::array<VkFormat, 2>{VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED}, "shader library retained ignored attachment formats");
+            }
+            Require(mock.libraryDepthFormats.at(VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT) == std::array<VkFormat, 2>{format, HasStencil(format) ? format : VK_FORMAT_UNDEFINED}, "output library lost attachment formats");
+            before = after;
+        }
         for (std::uint32_t set = 0; set < 2; ++set) {
             if (set == 0) { ++mainKey[0]; resources.main = makeHandle<VkDescriptorSetLayout>(); }
             else { ++fragmentKey[0]; resources.fragment = makeHandle<VkDescriptorSetLayout>(); }

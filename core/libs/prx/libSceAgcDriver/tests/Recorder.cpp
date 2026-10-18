@@ -10595,7 +10595,13 @@ void pipelineLibraryTests(const Device& device) {
     state.depthTest = true;
     state.depthCompare = VK_COMPARE_OP_LESS;
     static_cast<void>(lookup());
-    Require(counters().built == std::array<std::uint64_t, 4>{2, 3, 5, 5}, "a depth target shared the shader libraries built with no depth format");
+    Require(counters().built == std::array<std::uint64_t, 4>{2, 2, 4, 5}, "a depth target rebuilt more than the fragment output library");
+    for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+        const auto beforeDepthChange = counters().built;
+        state.depth->format = format;
+        static_cast<void>(lookup());
+        Require(counters().built == std::array<std::uint64_t, 4>{beforeDepthChange[0], beforeDepthChange[1], beforeDepthChange[2], beforeDepthChange[3] + 1u}, "a depth or stencil format change rebuilt more than the fragment output library");
+    }
     state.depth.reset();
     state.depthTest = false;
     if ((context.sampleLocationSampleCounts & VK_SAMPLE_COUNT_4_BIT) != 0) {
