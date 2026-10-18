@@ -67,7 +67,7 @@ VkComponentSwizzle ComponentSwizzleFor(std::uint8_t dstSel) {
 }
 
 VkComponentMapping ViewComponents(const GuestTextureResource& resource) {
-    if (IsConvertedTextureFormat(resource.format) && !IsRepackedTextureFormat(resource.format)) return {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+    if (IsConvertedTextureFormat(resource.format) && !IsRepackedTexture(resource)) return {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
     const auto channel = [&](std::uint8_t dstSel) { return TextureComponentChannel(resource.format, ComponentSwizzleFor(dstSel)); };
     return {channel(resource.dstSelX), channel(resource.dstSelY), channel(resource.dstSelZ), channel(resource.dstSelW)};
 }
@@ -847,7 +847,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         // The lookup's Refresh may have flushed another image's results over the memory (which
         // marks the keys uncompressed): a surface that stays a snapshot re-reads them behind that
         // flush, as it does behind its own. APS5_NO_KEYS_RESCAN=1 keeps the keys scanned above.
-        if (source != nullptr && IsRepackedTextureFormat(resource.format) && !Texture::CanRepackCopyFrom(*source, resource)) source.reset();
+        if (source != nullptr && IsRepackedTexture(resource) && !Texture::CanRepackCopyFrom(*source, resource)) source.reset();
         static const bool rescan = std::getenv("APS5_NO_KEYS_RESCAN") == nullptr;
         if (rescan && source == nullptr) keys.reset();
     }
@@ -895,7 +895,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             texture->RefreshDepthCopy();
             return texture;
         }
-        if (source != nullptr && IsRepackedTextureFormat(resource.format)) {
+        if (source != nullptr && IsRepackedTexture(resource)) {
             auto texture = std::make_shared<Texture>(context, source, resource, components, Texture::RepackCopyTag{});
             texture->RefreshDepthCopy();
             return texture;
@@ -995,7 +995,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         } else if (blockCopy) {
             entry.texture = createTexture(source, resource, components, Texture::BlockCopyTag{});
             entry.texture->RefreshDepthCopy();
-        } else if (IsRepackedTextureFormat(resource.format)) {
+        } else if (IsRepackedTexture(resource)) {
             entry.texture = createTexture(source, resource, components, Texture::RepackCopyTag{});
             entry.texture->RefreshDepthCopy();
         } else if (srgbExpand) {
@@ -1005,6 +1005,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             entry.texture = createTexture(source, resource, components);
         }
         entry.accounted = source->Cached() ? 0u : heldBytes(*source);
+        if (repackCopy) entry.accounted += entry.texture->AllocationBytes();
         counters.fromStorage.fetch_add(1, std::memory_order_relaxed);
     } else {
         // Snapshot before the upload so a write racing with it is caught by the next comparison.

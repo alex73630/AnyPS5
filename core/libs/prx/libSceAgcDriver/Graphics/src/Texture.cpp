@@ -318,7 +318,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
     try {
-        const auto colorFormat = SampledTextureFormat(context, descriptor.format);
+        const auto colorFormat = SampledTextureFormat(context, descriptor);
         const bool srgbExpand = !depthCompare && SrgbExpandsToRgba8(context, descriptor.format);
         Require(!depthCompare || colorFormat == VK_FORMAT_R32_SFLOAT || colorFormat == VK_FORMAT_R16_UNORM, "comparison sampling requires an R32 float or R16 unorm depth texture");
         Require(!depthCompare || descriptor.dimension != TextureDimension::k3D, "comparison sampling does not support 3D depth textures");
@@ -436,7 +436,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     detiler.Dispatch(commands, descriptor.tileMode, elementBytes, tiled->Handle(), guestLayerOffset + mip.tiledOffset, linear->Handle(), linearLayerOffset + mip.linearOffset, mip, false, layer, geometry.thick, {.pipeBankXor = descriptor.pipeBankXor});
                 }
             }
-            if (IsRepackedTextureFormat(descriptor.format)) {
+            if (IsRepackedTexture(descriptor)) {
                 RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
                 for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
                     for (std::uint32_t level = 0; level < mips.size(); ++level) {
@@ -604,7 +604,7 @@ bool Texture::CanBlockCopyFrom(const StorageTexture& source, const GuestTextureR
 
 bool Texture::CanRepackCopyFrom(const StorageTexture& source, const GuestTextureResource& descriptor) {
     const auto& from = source.Descriptor();
-    if (!IsRepackedTextureFormat(descriptor.format) || descriptor.dimension == TextureDimension::k3D || ResolveTextureFormat(from.format) != ResolveTextureFormat(descriptor.format)) return false;
+    if (!IsRepackedTexture(descriptor) || descriptor.dimension == TextureDimension::k3D || ResolveTextureFormat(from.format) != ResolveTextureFormat(descriptor.format)) return false;
     if (descriptor.baseAddress != from.baseAddress || descriptor.pipeBankXor != from.pipeBankXor || descriptor.width != from.width || descriptor.height != from.height || !ArrayLayersServeView(from, descriptor) || descriptor.tileMode != from.tileMode || descriptor.mipCount > from.mipCount) return false;
     const auto geometry = DescribeSurface(descriptor);
     return geometry.imageDepth == 1 && source.ImageDepth() == 1 && source.ImageLayers() >= geometry.imageLayers;
@@ -613,7 +613,7 @@ bool Texture::CanRepackCopyFrom(const StorageTexture& source, const GuestTexture
 Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components, RepackCopyTag) : context(context), storageSource(source), perUseCopy(PerUseCopy::RefreshedOnReuse), repackCopy(true) {
     try {
         Require(source != nullptr && CanRepackCopyFrom(*source, descriptor), "storage image cannot serve a repacked copy of the sampled texture");
-        const auto format = SampledTextureFormat(context, descriptor.format);
+        const auto format = SampledTextureFormat(context, descriptor);
         const auto geometry = DescribeSurface(descriptor);
         copyWidth = descriptor.width;
         copyHeight = descriptor.height;
@@ -663,6 +663,8 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
         createFirstLayerView(descriptor, viewInfo);
         prepareBaseLevelView(descriptor, viewInfo);
+        countedBytes = allocationBytes;
+        SampledMemoryCounter().fetch_add(countedBytes, std::memory_order_relaxed);
     } catch (...) {
         release();
         throw;
@@ -672,7 +674,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
 Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components, BlockCopyTag) : context(context), storageSource(source), perUseCopy(PerUseCopy::RefreshedOnReuse) {
     try {
         Require(source != nullptr && CanBlockCopyFrom(*source, descriptor), "storage image cannot serve a block copy of the sampled texture");
-        blockFormat = SampledTextureFormat(context, descriptor.format);
+        blockFormat = SampledTextureFormat(context, descriptor);
         const auto geometry = DescribeSurface(descriptor);
         copyWidth = descriptor.width;
         copyHeight = descriptor.height;
@@ -1016,7 +1018,7 @@ bool Texture::CanCopyFrom(const StorageTexture& source, const GuestTextureResour
     if (IsBlockCompressed(descriptor.format) || IsBlockCompressed(from.format)) return false;
     // Same memory, same layout, same texel size: the GPU copy reinterprets the texels exactly as a
     // guest read through the sampled descriptor would.
-    if (IsRepackedTextureFormat(descriptor.format)) return false;
+    if (IsRepackedTexture(descriptor)) return false;
     return descriptor.baseAddress == from.baseAddress && descriptor.pipeBankXor == from.pipeBankXor && descriptor.width == from.width && descriptor.height == from.height && ArrayLayersServeView(from, descriptor) && descriptor.tileMode == from.tileMode && descriptor.mipCount <= from.mipCount && BytesPerElement(descriptor.format) == BytesPerElement(from.format) && BlockWidth(descriptor.format) == BlockWidth(from.format);
 }
 
@@ -1025,7 +1027,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
     PhaseTimer timer;
     try {
         Require(source != nullptr && CanCopyFrom(*source, descriptor), "storage image does not match the sampled texture");
-        const auto vkFormat = SampledTextureFormat(context, descriptor.format);
+        const auto vkFormat = SampledTextureFormat(context, descriptor);
         const auto geometry = DescribeSurface(descriptor);
 #ifdef APS5_DEBUG_LOG
         AGC_LOG_DEFERRED(stdout, "Texture address=0x%llx %ux%u mips=%u viewed from storage image (vk=%d)", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, static_cast<int>(vkFormat));

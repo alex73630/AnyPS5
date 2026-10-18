@@ -11,6 +11,7 @@
 namespace AgcDriver::Graphics {
 
 struct Context;
+struct GuestTextureResource;
 
 VkFormat ResolveTextureFormat(std::uint32_t guestFormat);
 VkComponentSwizzle TextureComponentChannel(std::uint32_t guestFormat, VkComponentSwizzle component);
@@ -18,6 +19,7 @@ std::uint32_t SrgbDecodeFormats(PFN_vkGetPhysicalDeviceFormatProperties formatPr
 VkFormat SampledTextureFormat(const Context& context, std::uint32_t guestFormat);
 std::uint32_t SrgbCopyFormats(PFN_vkGetPhysicalDeviceFormatProperties formatProperties, VkPhysicalDevice physical, std::uint32_t decodeFormats);
 bool SrgbExpandsToRgba8(const Context& context, std::uint32_t guestFormat);
+VkFormat SampledTextureFormat(const Context& context, const GuestTextureResource& resource);
 bool IsSrgbTextureFormat(std::uint32_t guestFormat);
 bool IgnoresForcedDegamma(std::uint32_t guestFormat);
 std::optional<std::uint32_t> FindGuestTextureFormat(VkFormat format, std::uint32_t elementBytes);
@@ -25,6 +27,7 @@ std::optional<std::uint32_t> FindGuestColorTargetFormat(VkFormat format, std::ui
 std::uint32_t BytesPerElement(std::uint32_t guestFormat);
 bool IsConvertedTextureFormat(std::uint32_t guestFormat);
 bool IsRepackedTextureFormat(std::uint32_t guestFormat);
+bool IsRepackedTexture(const GuestTextureResource& resource);
 std::uint32_t RepackTextureWord(std::uint32_t word);
 bool IsBlockCompressed(std::uint32_t guestFormat);
 std::uint32_t BlockWidth(std::uint32_t guestFormat);

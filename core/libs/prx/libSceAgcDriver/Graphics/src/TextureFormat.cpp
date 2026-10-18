@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <array>
 #include <cstdlib>
@@ -210,6 +211,15 @@ bool IsConvertedTextureFormat(std::uint32_t guestFormat) {
 
 bool IsRepackedTextureFormat(std::uint32_t guestFormat) {
     return guestFormat == static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format10_11_11Float);
+}
+
+bool IsRepackedTexture(const GuestTextureResource& resource) {
+    return IsRepackedTextureFormat(resource.format) && resource.dimension != TextureDimension::k3D;
+}
+
+VkFormat SampledTextureFormat(const Context& context, const GuestTextureResource& resource) {
+    if (IsRepackedTextureFormat(resource.format) && !IsRepackedTexture(resource)) return ResolveTextureFormat(resource.format);
+    return SampledTextureFormat(context, resource.format);
 }
 
 std::uint32_t RepackTextureWord(std::uint32_t word) {

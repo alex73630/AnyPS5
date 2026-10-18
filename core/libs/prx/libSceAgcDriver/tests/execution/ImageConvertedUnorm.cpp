@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
@@ -230,6 +231,34 @@ void Run(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, c
     const auto result = ShaderRecompiler::Recompile(request);
     device.Dispatch(result, groups, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
     device.WaitIdle();
+}
+
+auto NativeSampleReference(AgcDriver::VulkanDevice& device, const std::uint8_t* texels, std::span<const std::uint32_t> code, std::array<std::uint32_t, 8> texture, const std::array<std::uint32_t, 4>& sampler, const std::array<std::uint32_t, 8>& target = {}) {
+    const auto results = Output;
+    GuestBlock native;
+    const auto resource = AgcDriver::Graphics::DecodeTextureResource(texture);
+    const auto bytes = AgcDriver::Graphics::DescribeSurface(resource).guestBytes;
+    Require(bytes <= BlockBytes, "native sample fixture exceeds its allocation");
+    for (std::size_t offset = 0; offset < bytes; offset += 4u) {
+        std::uint32_t word = 0;
+        std::memcpy(&word, texels + offset, sizeof(word));
+        word = AgcDriver::Graphics::RepackTextureWord(word);
+        std::memcpy(native.Data() + offset, &word, sizeof(word));
+    }
+    const auto address = reinterpret_cast<std::uintptr_t>(native.Data());
+    texture[0] = static_cast<std::uint32_t>(address >> 8u);
+    texture[1] = (texture[1] & ~0x1ff000ffu) | (36u << 20u) | static_cast<std::uint32_t>(address >> 40u);
+    const auto swizzle = texture[3] & 0xfffu;
+    texture[3] &= ~0xfffu;
+    for (std::uint32_t component = 0; component < 4u; ++component) {
+        const auto selector = (swizzle >> (component * 3u)) & 7u;
+        texture[3] |= (selector == 4u ? 6u : selector == 6u ? 4u : selector) << (component * 3u);
+    }
+    Run(device, code, texture, sampler, 1, target);
+    const auto reference = Output;
+    Require(reference == results, "repacked sampling differs from native format 36");
+    Output = results;
+    return reference;
 }
 
 void CheckLoad(AgcDriver::VulkanDevice& device, const std::uint8_t* texels, std::span<const std::uint32_t> code, std::uint32_t dmask, std::uint32_t format, std::uint32_t swizzle, const std::string& what) {
@@ -551,6 +580,7 @@ void CheckCube(AgcDriver::VulkanDevice& device, std::uint32_t format, bool linea
             Input[tid * 4u + 2u] = std::bit_cast<std::uint32_t>(static_cast<float>(face / 6u * 8u + face % 6u));
         }
         Run(device, SampleCube, texture, sampler, 1, input);
+        const auto nativeResults = format == FloatFormat ? NativeSampleReference(device, block.Data(), SampleCube, texture, sampler, input) : Output;
         for (std::uint32_t tid = 0; tid < Threads && first + tid < faces * coordinates.size(); ++tid) {
             const auto index = first + tid;
             const auto face = index / coordinates.size();
@@ -566,6 +596,7 @@ void CheckCube(AgcDriver::VulkanDevice& device, std::uint32_t format, bool linea
             for (std::uint32_t component = 0; component < 4u; ++component) {
                 double expected = tap(face, ix, iy, component);
                 if (linear) expected = std::lerp(std::lerp(expected, tap(face, ix + 1, iy, component), wx), std::lerp(tap(face, ix, iy + 1, component), tap(face, ix + 1, iy + 1, component), wx), wy);
+                if (format == FloatFormat) expected = std::bit_cast<float>(nativeResults[tid * 4u + component]);
                 const auto actual = std::bit_cast<float>(Output[tid * 4u + component]);
                 Require(std::fabs(actual - expected) <= SampleTolerance * std::max(1.0, std::fabs(expected)), "converted cube face " + std::to_string(face) + " sample " + std::to_string(index % coordinates.size()) + " channel " + std::to_string(component) + " is " + std::to_string(actual) + ", expected " + std::to_string(expected));
             }
@@ -623,6 +654,7 @@ void CheckMipSample(AgcDriver::VulkanDevice& device, std::uint32_t format, std::
             Input[tid * 4u + 3u] = std::bit_cast<std::uint32_t>(lods[tid % lods.size()]);
         }
         Run(device, code, texture, sampler, 1, input);
+        const auto nativeResults = format == FloatFormat && type != 10u ? NativeSampleReference(device, block.Data(), code, texture, sampler, input) : Output;
         for (std::uint32_t tid = 0; tid < Threads; ++tid) {
             const auto layer = tid % layers;
             const float lod = test.filter == 0 ? 0 : std::clamp(std::clamp(lods[tid % lods.size()] + test.bias, test.minimum, test.maximum), 0.0f, static_cast<float>(2u - test.base));
@@ -632,7 +664,8 @@ void CheckMipSample(AgcDriver::VulkanDevice& device, std::uint32_t format, std::
             const auto lowLayer = type == 10u ? layer >> low : layer;
             const auto highLayer = type == 10u ? layer >> high : layer;
             for (std::uint32_t component = 0; component < 4u; ++component) {
-                const auto expected = std::lerp(ChannelValue(texel(lowLayer, low), SwizzleZYX1, component, format == FloatFormat), ChannelValue(texel(highLayer, high), SwizzleZYX1, component, format == FloatFormat), weight);
+                auto expected = std::lerp(ChannelValue(texel(lowLayer, low), SwizzleZYX1, component, format == FloatFormat), ChannelValue(texel(highLayer, high), SwizzleZYX1, component, format == FloatFormat), weight);
+                if (format == FloatFormat && type != 10u) expected = std::bit_cast<float>(nativeResults[tid * 4u + component]);
                 const auto actual = std::bit_cast<float>(Output[tid * 4u + component]);
                 Require(std::fabs(actual - expected) <= SampleTolerance * std::max(1.0, std::fabs(expected)), "converted mip sample type " + std::to_string(type) + " filter " + std::to_string(test.filter) + " base " + std::to_string(test.base) + " thread " + std::to_string(tid) + " channel " + std::to_string(component) + " is " + std::to_string(actual) + ", expected " + std::to_string(expected));
             }
@@ -689,6 +722,7 @@ void CheckUnnormalizedSample(AgcDriver::VulkanDevice& device, std::uint32_t form
                 Input[first + 2u] = std::bit_cast<std::uint32_t>(static_cast<float>(tid % 7u) - 2.0f);
             }
             Run(device, code, texture, sampler, 1, input);
+            const auto nativeResults = format == FloatFormat ? NativeSampleReference(device, block.Data(), code, texture, sampler, input) : Output;
             for (std::uint32_t tid = 0; tid < Threads; ++tid) {
                 const auto position = [&](std::uint32_t component) {
                     const auto coordinate = std::bit_cast<float>(Input[tid * 4u + component + (offset ? 1u : 0u)]);
@@ -708,7 +742,8 @@ void CheckUnnormalizedSample(AgcDriver::VulkanDevice& device, std::uint32_t form
                         }
                         return ChannelValue(texel(std::clamp(u, 0, size - 1), std::clamp(v, 0, size - 1), base), test.swizzle, component, format == FloatFormat);
                     };
-                    const auto expected = test.mag == 0u ? tap(x, y) : std::lerp(std::lerp(tap(x, y), tap(x + 1, y), weightX), std::lerp(tap(x, y + 1), tap(x + 1, y + 1), weightX), weightY);
+                    auto expected = test.mag == 0u ? tap(x, y) : std::lerp(std::lerp(tap(x, y), tap(x + 1, y), weightX), std::lerp(tap(x, y + 1), tap(x + 1, y + 1), weightX), weightY);
+                    if (format == FloatFormat) expected = std::bit_cast<float>(nativeResults[tid * 4u + component]);
                     const auto actual = std::bit_cast<float>(Output[tid * 4u + component]);
                     Require(std::fabs(actual - expected) <= SampleTolerance * std::max(1.0, std::fabs(expected)), "unnormalized converted sample filter " + std::to_string(test.mag) + " border " + std::to_string(test.border) + " base " + std::to_string(base) + " thread " + std::to_string(tid) + " channel " + std::to_string(component) + " is " + std::to_string(actual) + ", expected " + std::to_string(expected));
                 }
@@ -755,6 +790,7 @@ void CheckMipCount(AgcDriver::VulkanDevice& device, std::uint32_t format, std::u
 
 void CheckSample(AgcDriver::VulkanDevice& device, const std::uint8_t* texels, std::span<const std::uint32_t> code, std::uint32_t step, std::uint32_t start, std::uint32_t format, std::uint32_t swizzle, const std::array<std::uint32_t, 4>& sampler, bool linear, bool wrap, const std::string& what, bool mirror = false) {
     Run(device, code, TextureDescriptor(texels, format, swizzle, LoadWidth), sampler, 1);
+    const auto nativeResults = format == FloatFormat ? NativeSampleReference(device, texels, code, TextureDescriptor(texels, format, swizzle, LoadWidth), sampler) : Output;
     const auto texelAt = [&](std::int64_t index) {
         const auto width = static_cast<std::int64_t>(LoadWidth);
         auto addressed = wrap ? ((index % width) + width) % width : std::clamp<std::int64_t>(index, 0, width - 1);
@@ -781,11 +817,13 @@ void CheckSample(AgcDriver::VulkanDevice& device, const std::uint8_t* texels, st
             } else {
                 expected = ChannelValue(texelAt(static_cast<std::int64_t>(std::floor(x))), swizzle, component, format == FloatFormat);
             }
+            if (format == FloatFormat) expected = std::bit_cast<float>(nativeResults[tid * 4u + component]);
             const auto actual = static_cast<double>(std::bit_cast<float>(Output[tid * 4u + component]));
             Require(std::fabs(actual - expected) <= SampleTolerance * std::max(1.0, std::fabs(expected)), what + ": thread " + std::to_string(tid) + " component " + std::to_string(component) + " is " + std::to_string(actual) + ", expected " + std::to_string(expected));
         }
     }
 }
+
 
 void CheckConvertedPreparation(AgcDriver::VulkanDevice& device, const std::uint8_t* texels) {
     std::vector<std::uint32_t> userData(24, 0u);
@@ -807,7 +845,7 @@ void CheckConvertedPreparation(AgcDriver::VulkanDevice& device, const std::uint8
     const auto plain = ShaderRecompiler::GetResourcePlan(request);
     Require(plain->info.images.size() == 1u && std::ranges::none_of(plain->info.runtimeImageModes.at(0), convertedMode), "a sampled image is prepared with converted-sample modes before a converted descriptor was seen");
     const auto prepared = ShaderRecompiler::GetResourcePlan(converted);
-    Require(prepared->info.images.size() == 1u && std::ranges::count_if(prepared->info.runtimeImageModes.at(0), convertedMode) == 2, "a sampled image is not prepared with both converted-sample modes once a converted descriptor was seen");
+    Require(prepared->info.images.size() == 1u && std::ranges::count_if(prepared->info.runtimeImageModes.at(0), convertedMode) == 1, "a sampled image is not prepared with the converted unorm sample mode once a converted descriptor was seen");
     const auto handle = ShaderRecompiler::PrepareShader(request);
     Require(!ShaderRecompiler::PreparedShaderInvocation::TryCreate(converted, handle).has_value(), "an artifact prepared without converted-sample modes matches a request that asks for them");
     const auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(request, handle);
@@ -826,6 +864,9 @@ void CheckConvertedPreparation(AgcDriver::VulkanDevice& device, const std::uint8
     const auto convertedInvocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(converted, convertedHandle);
     Require(convertedInvocation.has_value(), "the artifact prepared with converted-sample modes does not match its request");
     static_cast<void>(convertedInvocation->Capture(runtime));
+    const auto nativeTexture = TextureDescriptor(texels, FloatFormat, SwizzleXYZ1, LoadWidth);
+    std::copy(nativeTexture.begin(), nativeTexture.end(), userData.begin() + 4);
+    static_cast<void>(invocation->Capture(runtime));
 }
 
 void RequireRefused(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, const std::uint8_t* texels, std::uint32_t swizzle, const std::array<std::uint32_t, 4>& extra, const std::string& reason, const std::string& what, std::uint32_t format = UnormFormat) {

@@ -174,6 +174,10 @@ ImageDecode rejectImage(PoisonReason reason, std::string detail) {
     return result;
 }
 
+bool nativeRepackedImage(const ImageResource& image, IrBufferFormat format, RdnaImageDimension dimension) {
+    return format == IrBufferFormat::Format10_11_11Float && image.resourceClass != ImageResourceClass::Storage && !image.packed && dimension != RdnaImageDimension::Dim3D;
+}
+
 PoisonReason invalidImageReason(const DescriptorValue& descriptor) {
     const auto type = rawImageType(descriptor);
     if (type < ImageType::Color1D) {
@@ -262,7 +266,7 @@ ImageDecode inspectImageDescriptor(const DescriptorValue& descriptor, const Imag
                                                                      : "MIMG BY2/BY4 requires a direct, identity-swizzled 2D image whose elements fill one dword: R8, R16 or RG8 for BY2, R8 for BY4");
         }
     }
-    const bool nativeRepacked = format == IrBufferFormat::Format10_11_11Float && !storage && !base.packed;
+    const bool nativeRepacked = nativeRepackedImage(base, format, decoded.dimension);
     const auto remappedFormat = storage ? RemapStorageTextureFormat(format) : RemapTextureFormat(format);
     decoded.conversionFormat = remappedFormat != format && !nativeRepacked ? format : IrBufferFormat::Invalid;
     if (format == IrBufferFormat::Format11_11_10UNorm || (format == IrBufferFormat::Format10_11_11Float && !nativeRepacked)) {
@@ -1410,7 +1414,7 @@ std::uint32_t convertedSampleState(const ShaderInfo& info, const ResourceSnapsho
     const auto& descriptor = snapshot.images[index];
     if (descriptor.dwordCount != 8u || nullImageDescriptor(image, descriptor)) return 0u;
     const auto format = rawImageFormat(descriptor);
-    if (format != IrBufferFormat::Format11_11_10UNorm && format != IrBufferFormat::Format10_11_11Float) return 0u;
+    if ((format != IrBufferFormat::Format11_11_10UNorm && format != IrBufferFormat::Format10_11_11Float) || nativeRepackedImage(image, format, descriptorDimension(descriptor, image.dimension))) return 0u;
     if (((descriptor.dwords[1] >> 8u) & 0xfffu) > ((descriptor.dwords[3] >> 12u) & 0xfu) * 256u) throw std::runtime_error("sampling of a converted image with an image-view minimum LOD clamp is not implemented");
     std::optional<std::uint32_t> samplerState;
     std::optional<std::array<std::uint32_t, 2>> samplerLod;
@@ -1548,7 +1552,7 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
         const auto& descriptor = snapshot.images.at(i);
         if (!image.convertedSamples && !image.srgbDecodeCompatible && convertedSampleCompatible(image) && descriptor.dwordCount == 8u && !nullImageDescriptor(image, descriptor)) {
             const auto format = rawImageFormat(descriptor);
-            if (format == IrBufferFormat::Format11_11_10UNorm || format == IrBufferFormat::Format10_11_11Float) throw ConvertedSampleRequired("samples a converted image through a shader prepared without converted-sample modes");
+            if (format == IrBufferFormat::Format11_11_10UNorm || (format == IrBufferFormat::Format10_11_11Float && !nativeRepackedImage(image, format, descriptorDimension(descriptor, image.dimension)))) throw ConvertedSampleRequired("samples a converted image through a shader prepared without converted-sample modes");
         }
         static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, plan.info.runtimeImageModes.at(i)));
     }
@@ -2107,6 +2111,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
         }
     }
     if (modes.empty() && !table) throw std::runtime_error("image instruction has no supported runtime modes");
+    std::erase_if(modes, [&](const ImageResource& mode) { return nativeRepackedImage(mode, mode.conversionFormat, mode.dimension); });
     if (image.foldTexelOffsetsOnly && std::ranges::any_of(modes, [](const ImageResource& mode) { return UnnormalizedSampleMismatch(mode) == nullptr; })) {
         std::erase_if(modes, [](const ImageResource& mode) { return UnnormalizedSampleMismatch(mode) != nullptr; });
     }
