@@ -363,6 +363,8 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_PROBE_DISPATCH` | string | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp` |  | probes one dispatch at a hex program address (optionally `:index`) with debug output |
 | `APS5_PROFILE_DRAW` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp` |  | prints the per-phase driver and draw timing totals |
 | `APS5_PROFILE_GPU` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | records the GPU time of recorded work by key from batch timestamps |
+| `APS5_PROFILE_GPU_DRAWS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` | unset | records GPU time per draw by guest fragment or pre-rasterization shader entry; requires `APS5_PROFILE_GPU` and raises the per-batch timing capacity to 8192 |
+| `APS5_REGISTRATION_WORD_LIMIT` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` | 200000 | maximum SPIR-V words in a registration module; larger shaders use descriptor-specialized variants; accepts unsigned 32-bit values |
 | `APS5_REAP_EACH_PACKET` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/DeferredLabels.cpp` |  | reaps deferred labels after every packet |
 | `APS5_RELEASE_ON_UNLOCK` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | destroys deferred batches on the unlocking thread instead of a release thread |
 | `APS5_RELEASE_QUEUE_MAX` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` | 256 | maximum deferred batches handed to the release thread before a thread destroys its own |
@@ -403,6 +405,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_SYNC_TEXTURE_UPLOAD` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | restores the waiting batch for every texture upload |
 | `APS5_TEMPLATE_AUDIT_MS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 1000 | milliseconds after which a cached shader-resource object takes the full walk instead of the fast proof; `0` turns the audit off |
 | `APS5_TEXTURE_CACHE_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 0 | forced byte budget in MiB for the storage and sampled texture caches; `0` selects the budget automatically |
+| `APS5_STORAGE_CACHE_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` | 0 | overrides only the storage texture cache budget in MiB; `0` uses `APS5_TEXTURE_CACHE_MIB` or the automatic budget |
 | `APS5_THREAD_NICE` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/ThreadPriority.cpp` | -10 | nice value the raised queue workers and presenter ask rtkit for (clamped to -20..19) |
 | `APS5_THREAD_PRIORITY` | string | `core/libs/prx/libSceAgcDriver/Execution/src/ThreadPriority.cpp` | off | raises the queue workers and presenter above the title's threads: `off`, `high` or `rt` |
 | `APS5_THREAD_RT` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/ThreadPriority.cpp` | 10 | realtime priority the raised threads ask rtkit for (clamped to 1..99) |
@@ -540,6 +543,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_WGI` | presence | `core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp` |  | turns off SDL's Windows.Gaming.Input joystick backend at default hint priority, on Windows hosts where it faults a few seconds into every run |
 | `APS5_OUTPUT_RESOLUTION` | string | `core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp` |  | `<width>x<height>` in pixels that replaces the host display's size when `sceVideoOutGetOutputStatus` and `sceVideoOutGetOutputStatusWithVrr` report the output resolution: 1 for a size below 3840 wide and 2160 high, 2 otherwise, as for the display; unset or empty follows the display, and any other value makes those calls throw |
 | `APS5_VIDEOOUT_TELEMETRY_DIR` | string | `core/libs/prx/libSceVideoOut/src/Telemetry.cpp` |  | directory where videoout.jsonl is appended with the pad and present telemetry lines; nothing is opened when unset or empty |
+| `APS5_SHADER_STATUS` | string | `core/libs/prx/libSceVideoOut/src/DisplayWindow.cpp` | unset | shows shader preparation and active pipeline compilation counters in the window title; `0` disables it |
 
 ### libSceVideodec2
 
