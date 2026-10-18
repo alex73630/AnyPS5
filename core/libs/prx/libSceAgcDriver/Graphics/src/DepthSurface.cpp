@@ -1637,7 +1637,7 @@ struct LayeredDepth {
         viewInfo.image = image->image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         viewInfo.format = this->slices.front()->hostFormat;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | (target.stencilAddress != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u), 0, 1, 0, static_cast<std::uint32_t>(this->slices.size())};
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | (target.stencilAddress != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u), 0, 1, this->slices.front()->layer, static_cast<std::uint32_t>(this->slices.size())};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView layered depth");
     }
     ~LayeredDepth() { context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr); }
@@ -2116,6 +2116,23 @@ VkImageView layeredDepthView(const Context& context, const DepthTarget& target, 
     const auto cleared = takeClearedHtiles(slices);
     auto& groups = layeredDepths();
     auto found = std::find_if(groups.begin(), groups.end(), [&](const auto& group) { return group->context.device == context.device && group->slices.size() == layers && sameSurface(group->target, target); });
+    if (found == groups.end()) {
+        std::vector<DepthSurface*> owners;
+        for (const auto& group : groups) {
+            if (group->context.device != context.device || group->slices.size() < layers) continue;
+            for (std::size_t first = 0; first <= group->slices.size() - layers; ++first) {
+                const auto begin = group->slices.begin() + first;
+                if (!std::equal(slices.begin(), slices.end(), begin, [](const auto& slice, const auto* surface) { return surface->active->load(std::memory_order_acquire) && sameSurface(slice, surface->target); })) continue;
+                owners.assign(begin, begin + layers);
+                break;
+            }
+            if (!owners.empty()) break;
+        }
+        if (!owners.empty()) {
+            groups.push_back(std::make_unique<LayeredDepth>(context, target, std::move(owners)));
+            found = std::prev(groups.end());
+        }
+    }
     const bool created = found == groups.end();
     if (created) {
         for (const auto& slice : slices) requireNoNativeAlias(context, slice);
