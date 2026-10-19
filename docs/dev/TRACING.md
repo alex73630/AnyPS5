@@ -36,7 +36,7 @@ Set a switch before starting the emulator. Unless noted, any value enables it. M
 | `APS5_TRACE_DCC_KEYS` | Display and storage-image DCC key reads, writes, fills and clears. |
 | `APS5_TRACE_DISPATCH_CACHE` | Compute dispatch cache hits, misses and changed user-data words. |
 | `APS5_TRACE_DISPATCH_IO` | Compute dispatch queue, submission serial, shader and resources; value `2` also prints small user-data buffers. |
-| `APS5_TRACE_DRAW_CACHE` | Draw-cache lookups, hits, misses, and key differences, reported every ten seconds. |
+| `APS5_TRACE_DRAW_CACHE` | Draw-cache lookups, hits, misses, key differences and relocation word gates, reported every ten seconds. `DrawRelocationGate` trace counters classify the current shape donor's changed words as eligible, blocked only by the front stage, blocked by a later stage, or unknown. `DrawRelocationFrontBlock` separates whole-stage ineligibility from overlapping word-level reasons for front-only blockers. These counters cover only the current shape donor's first variant after alias lookup failed; eligibility does not establish matching contents or a reusable donor. |
 | `APS5_TRACE_DRAWS` | Draw inputs and per-draw timing phases. With `APS5_PROFILE_DRAW`, also prints the detailed draw lines. |
 | `APS5_TRACE_DRAW_PROGRAMS` | One line per draw listing selected shader stages, roles, code addresses and entry addresses. |
 | `APS5_TRACE_FILL_COVER` | Initial fill/image coverage mismatches and refused image-layer clears. |
