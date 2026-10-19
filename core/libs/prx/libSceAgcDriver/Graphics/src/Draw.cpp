@@ -1695,6 +1695,7 @@ struct ResourceUse {
 // stages repeat, or a fresh build.
 struct ResolvedResources {
     std::shared_ptr<ShaderResources> resources;
+    std::shared_ptr<Buffer> fault;
     std::vector<ShaderResources::MovedBuffer> moved;
     ResourceCache::Key contentKey;
     bool cacheable = false;
@@ -1722,15 +1723,19 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
         resolved.contentKey = DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
         auto cached = SharedResourceCache().Find(resolved.contentKey);
         const bool inUse = cached != nullptr && cached->InUse();
+        static const bool inFlightReuse = std::getenv("APS5_NO_IN_FLIGHT_DRAW_REUSE") == nullptr;
+        static const bool probe = std::getenv("APS5_PROBE_IN_FLIGHT_REUSE") != nullptr;
+        const bool shared = inUse && inFlightReuse && !probe && cached->ReusesAddressSpace();
+        const auto* activeRecorder = Recorder::Active();
+        const bool sharedBatch = shared && activeRecorder != nullptr && cached->LastRecordedSerial() == activeRecorder->OpenSerial();
         buildReason = inUse ? "DrawResources.build.in-use" : "DrawResources.build.miss";
         if (inUse) {
-            CountAddressReuse(AddressReuse::InUse);
+            if (!shared) CountAddressReuse(AddressReuse::InUse);
             PerformanceTrace::Count("DrawResources", "in-use");
             auto* recorder = Recorder::Active();
             const auto batchBefore = recorder != nullptr ? recorder->OpenSerial() : 0u;
             const bool sameBatch = batchBefore != 0 && cached->LastRecordedSerial() == batchBefore;
             PerformanceTrace::Count("DrawResources", sameBatch ? "in-use-same-batch" : "in-use-other-batch");
-            static const bool probe = std::getenv("APS5_PROBE_IN_FLIGHT_REUSE") != nullptr;
             if (probe && cached->ReusesAddressSpace()) {
                 PerformanceTimer probeTiming("DrawResources.probe.in-use", true);
                 ResourceUse probeUse;
@@ -1753,11 +1758,11 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 if (sameBatch && (recorder == nullptr || batchBefore != recorder->OpenSerial())) PerformanceTrace::Count("DrawResources.in-flight-probe", "submitted-during-proof");
             }
         }
-        if (cached != nullptr && !inUse) {
+        if (cached != nullptr && (!inUse || shared)) {
             const bool addressBased = cached->ReusesAddressSpace();
             const auto proofStart = addressBased && timer.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             ShaderResources::ProofReport proof;
-            const bool valid = cached->Revalidate(shaders, &proof, snapshots);
+            const bool valid = cached->Revalidate(shaders, &proof, snapshots, shared ? ShaderResources::InFlight::Allow : ShaderResources::InFlight::Refuse);
             if (valid) resolved.use.resources = cached;
             auto* recorder = Recorder::Active();
             std::optional<std::vector<ShaderResources::MovedBuffer>> moved;
@@ -1765,6 +1770,12 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             moveProof.refusal = ShaderResources::MoveRefusal::NoRecorder;
             if (valid && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder, &moveProof);
             if (moved.has_value()) {
+                if (shared) {
+                    resolved.fault = cached->UseFaultBuffer();
+                    CountInFlightAddressReuse();
+                    PerformanceTrace::Count("DrawResources", "reused-in-flight");
+                    PerformanceTrace::Count("DrawResources", sharedBatch ? "reused-in-flight-same-batch" : "reused-in-flight-other-batch");
+                }
                 PerformanceTrace::Count("DrawResources", "reused");
                 resolved.resources = std::move(cached);
                 resolved.moved = std::move(*moved);
@@ -2007,7 +2018,7 @@ struct Kept {
 // The completion side of a recorded draw: the kept objects, the record check, the lease outcome,
 // the GPU write notes, the copied-buffer write-back (listed in DrawCopiedWriters or run as a
 // completion action) and the targets marked dirty.
-void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>& resources, std::shared_ptr<Pipeline> pipeline, std::shared_ptr<Framebuffer> framebuffer, DrawInputs& inputs, std::vector<std::shared_ptr<StorageTexture>> targets, std::vector<std::pair<std::uint32_t, std::uint32_t>> slices, std::unique_ptr<DeviceBuffer> scratch, std::function<void()> checkRecords, bool listed, bool completion, const DrawOutcome& outcome) {
+void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>& resources, std::shared_ptr<Pipeline> pipeline, std::shared_ptr<Framebuffer> framebuffer, DrawInputs& inputs, std::vector<std::shared_ptr<StorageTexture>> targets, std::vector<std::pair<std::uint32_t, std::uint32_t>> slices, std::unique_ptr<DeviceBuffer> scratch, std::function<void()> checkRecords, bool listed, bool completion, const DrawOutcome& outcome, std::shared_ptr<Buffer> fault = {}) {
     auto kept = std::make_shared<Kept>();
     kept->resources = resources;
     kept->pipeline = std::move(pipeline);
@@ -2044,10 +2055,10 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
         writers->push_back(resources);
         GuestMemory::BreakProofs();
     } else if (completion) {
-        if (resources->Reusable()) {
-            recorder.OnComplete([resources, hold = resources->BeginUse()]() mutable {
+        if (resources->Reusable() || fault != nullptr) {
+            recorder.OnComplete([resources, fault = std::move(fault), hold = resources->BeginUse()]() mutable {
                 const auto held = std::move(hold);
-                resources->CompleteUse();
+                resources->CompleteUse(fault.get());
             });
         } else {
             recorder.OnComplete([resources] { resources->WriteBackBuffers(); });
@@ -2071,6 +2082,7 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
 struct RecordedDraw {
     Recorder* recorder = nullptr;
     std::shared_ptr<ShaderResources> resources;
+    std::shared_ptr<Buffer> fault;
     std::shared_ptr<Pipeline> pipeline;
     std::shared_ptr<Framebuffer> framebuffer;
     std::span<const VkImageView> targetViews;
@@ -2286,9 +2298,10 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         outcome.storesFlushed = true;
     }
     const auto drawBindings = [&] {
-        PerformanceTimer bindingsTiming(record.moved.empty() ? "DrawResources.bindings.own" : "DrawResources.bindings.rewritten", true);
-        return resources.PrepareDrawBindings(*recorder, record.moved);
+        PerformanceTimer bindingsTiming(record.moved.empty() && record.fault == nullptr ? "DrawResources.bindings.own" : "DrawResources.bindings.rewritten", true);
+        return resources.PrepareDrawBindings(*recorder, record.moved, false, record.fault);
     }();
+    Require(record.fault == nullptr || drawBindings != nullptr, "an in-flight draw has no per-use descriptor set");
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
     const bool addressBased = resources.HoldsLease();
@@ -2456,7 +2469,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     }
     recorder->LeaveRenderPassOpen(passKey, drawTiming, fenced, passAccess, std::move(storeProxies));
     timer.phase(PhaseRecord);
-    keepRecordedDraw(*recorder, record.resources, std::move(record.pipeline), std::move(record.framebuffer), inputs, std::move(record.targets), std::move(record.targetSlices), std::move(scratch), std::move(checkRecords), record.listed, record.completion, outcome);
+    keepRecordedDraw(*recorder, record.resources, std::move(record.pipeline), std::move(record.framebuffer), inputs, std::move(record.targets), std::move(record.targetSlices), std::move(scratch), std::move(checkRecords), record.listed, record.completion, outcome, record.fault);
     timer.phase(PhaseKeep);
     if (record.waited) {
         // The wait the dispatch path makes for such work (source 3, "address-based"): the
@@ -2904,9 +2917,10 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         const auto images = resources->StorageImages();
         Require(std::ranges::any_of(images, [&](const std::pair<VkImage, bool>& image) { return image.first == binding.resident->Image() && image.second; }), "the partial write of a packed color target does not store into the target's resident image");
     }
-    if (!lean && !resolved.moved.empty()) {
+    if (!lean && (!resolved.moved.empty() || resolved.fault != nullptr)) {
         resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
         resolved.moved.clear();
+        resolved.fault.reset();
     }
     if (state.depth) RequireNoNativeDepthFeedback_nid_no_patch(context, *state.depth, resources->SampledTextures());
     APS5_LOG_CHARS_OUT_DEBUG("Creating Pipeline");
@@ -3010,6 +3024,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
         record.recorder = recorder;
         record.resources = resources;
         record.moved = resolved.moved;
+        record.fault = resolved.fault;
         record.pipeline = pipeline;
         record.framebuffer = framebuffer;
         record.targetViews = targetViews;

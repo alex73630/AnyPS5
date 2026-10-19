@@ -3572,6 +3572,7 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
         outcome.failure = ProofFailure::Other;
         return refuse(AddressReuse::Threw);
     }
+    if (!reusable) return refuse(AddressReuse::NotReusable);
     suspend.armed = false;
     outcome.movedSnapshots = snapshotMatch == SnapshotMatch::Moved;
     if (outcome.movedSnapshots) CountMovedSnapshotProof();
@@ -5839,10 +5840,10 @@ std::size_t ShaderResources::DrawUploadLimit() {
     return limit;
 }
 
-std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly) const {
+std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly, std::shared_ptr<Buffer> fault) const {
     if (_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) return {};
     if (usesBda) {
-        if (!addressReuse || moved.empty()) return {};
+        if (!addressReuse || (moved.empty() && fault == nullptr)) return {};
         Require(std::all_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation < allocations.size() && (entry.words.empty() ? allocations[entry.allocation].guest && !allocations[entry.allocation].written && entry.view.buffer != VK_NULL_HANDLE : !allocations[entry.allocation].guest && DataRole(allocations[entry.allocation].role)); }), "address draw bindings require shader data words or live read-only views");
         movedOnly = true;
     }
@@ -5853,6 +5854,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     const auto uploadLimit = DrawUploadLimit();
     std::size_t totalSnapshotBytes = 0;
     auto result = std::make_shared<DrawBindings>();
+    result->fault = std::move(fault);
     thread_local std::vector<std::size_t>* selectedSlot = nullptr;
     auto& selected = ShaderRecompiler::ThreadOwned(selectedSlot);
     selected.clear();
@@ -5867,6 +5869,10 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     };
     for (std::size_t index = 0; index < allocations.size(); ++index) {
         const auto& item = allocations[index];
+        if (result->fault != nullptr && item.role == ShaderRecompiler::DescriptorRole::FaultBuffer) {
+            views.emplace_back(index, VkDescriptorBufferInfo{result->fault->Handle(), 0, ShaderRecompiler::BdaAbi::FaultBufferBytes});
+            continue;
+        }
         const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
         if (override != moved.end() && override->view.buffer != VK_NULL_HANDLE) {
             views.emplace_back(index, override->view);
@@ -5945,6 +5951,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         totalSnapshotBytes += bytes;
         CaptureTrace::Log("draw-snapshot batch=%llu address=%llx bytes=%zu", static_cast<unsigned long long>(recorder.Submissions() + 1), static_cast<unsigned long long>(begin), bytes);
     }
+    Require(result->fault == nullptr || std::any_of(views.begin(), views.end(), [&](const auto& view) { return allocations[view.first].role == ShaderRecompiler::DescriptorRole::FaultBuffer; }), "a per-use fault buffer has no descriptor override");
     if (selected.empty() && views.empty()) return {};
     Require(context.descriptorCache != nullptr, "draw snapshots require a descriptor cache");
     std::array<bool, 2> described{};
@@ -6010,6 +6017,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     Require(nextWrite == writes.end(), "draw snapshot writes disagree with their descriptor bindings");
     context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     recorder.Keep(result);
+    if (result->fault != nullptr) recorder.KeepBytes(result->fault.get(), result->fault->Bytes().size());
     for (const auto& snapshot : result->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
     return result;
 }
@@ -6108,13 +6116,19 @@ std::shared_ptr<const void> ShaderResources::BeginUse() {
     return std::make_shared<const Use>(usesInFlight, guestMemory.SpaceHold(), std::exchange(reuseProved, false));
 }
 
-void ShaderResources::CompleteUse() {
+std::shared_ptr<Buffer> ShaderResources::UseFaultBuffer() const {
+    Require(addressReuse && bda != nullptr && !LoopGuardEnabled(), "per-use fault buffers require reusable address draws without a loop guard");
+    return BdaResources::CreateFaultBuffer(context);
+}
+
+void ShaderResources::CompleteUse(Buffer* fault) {
     if (!addressReuse) {
+        Require(fault == nullptr, "a non-address use has a per-use fault buffer");
         CheckFaults();
         return;
     }
     try {
-        CheckFaults();
+        if (bda != nullptr) bda->CheckFault(fault);
     } catch (...) {
         reusable = false;
         throw;

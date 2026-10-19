@@ -123,13 +123,16 @@ std::uint64_t hashRanges(const std::vector<ShaderRecompiler::BdaAbi::Range>& ran
 
 }
 
-BdaResources::BdaResources(const Context& context) {
+std::shared_ptr<Buffer> BdaResources::CreateFaultBuffer(const Context& context) {
     static_assert(std::endian::native == std::endian::little);
     Require(ShaderRecompiler::BdaAbi::FaultBufferBytes <= context.limits.maxStorageBufferRange, "BDA fault buffer exceeds storage buffer range limit");
-    fault = std::make_unique<Buffer>(context, ShaderRecompiler::BdaAbi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    std::memset(fault->Bytes().data(), 0, ShaderRecompiler::BdaAbi::WrittenListWord * sizeof(std::uint32_t));
-    std::memset(fault->Bytes().data() + ShaderRecompiler::BdaAbi::SrtGuardWord * sizeof(std::uint32_t), 0, sizeof(std::uint32_t));
+    auto buffer = std::make_shared<Buffer>(context, ShaderRecompiler::BdaAbi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(buffer->Bytes().data(), 0, ShaderRecompiler::BdaAbi::WrittenListWord * sizeof(std::uint32_t));
+    std::memset(buffer->Bytes().data() + ShaderRecompiler::BdaAbi::SrtGuardWord * sizeof(std::uint32_t), 0, sizeof(std::uint32_t));
+    return buffer;
 }
+
+BdaResources::BdaResources(const Context& context) : fault(CreateFaultBuffer(context)) {}
 
 BdaResources::BdaResources(const Context& context, const GuestBufferMemory& memory) : BdaResources(context) {
     const auto cached = memory.CachedAddressTable();
@@ -241,13 +244,14 @@ bool LoopGuardTripped() {
     return loopGuardTripped.load(std::memory_order_relaxed);
 }
 
-void BdaResources::CheckFault() const {
-    markWrittenPages();
+void BdaResources::CheckFault(Buffer* use) const {
+    auto& buffer = use != nullptr ? *use : *fault;
+    markWrittenPages(buffer);
     ShaderRecompiler::BdaAbi::Fault report{};
-    std::memcpy(&report, fault->Bytes().data(), sizeof(report));
+    std::memcpy(&report, buffer.Bytes().data(), sizeof(report));
     if (report.state == ShaderRecompiler::BdaAbi::FaultState::Empty) {
         Require(static_cast<std::uint32_t>(report.reason) == 0 && report.address == 0 && report.bytes == 0 && report.stage == 0 && report.instruction == 0 && report.otherFaults == 0, "BDA fault record has data without publication");
-        checkSrtGuard();
+        checkSrtGuard(buffer);
         return;
     }
     Require(report.state == ShaderRecompiler::BdaAbi::FaultState::Ready && report.otherFaults <= 1, "incomplete or invalid BDA fault record");
@@ -256,7 +260,7 @@ void BdaResources::CheckFault() const {
         // APS5_LOOP_GUARD: the shader left a loop that ran past the guard; the dispatch result is kept.
         loopGuardTripped.store(true, std::memory_order_relaxed);
         std::fprintf(stderr, "[gpu] loop guard: the loop exit at pc 0x%x of shader 0x%llx ran past %u evaluations\n", report.instruction, static_cast<unsigned long long>(report.address), report.bytes);
-        std::memset(fault->Bytes().data(), 0, fault->Bytes().size());
+        std::memset(buffer.Bytes().data(), 0, buffer.Bytes().size());
         return;
     }
     if (report.reason == ShaderRecompiler::BdaAbi::FaultReason::ImageTable) {
@@ -320,10 +324,10 @@ void BdaResources::SetSrtGuards(std::vector<SrtGuardFaults> guards) {
     srtGuards = std::move(guards);
 }
 
-void BdaResources::checkSrtGuard() const {
+void BdaResources::checkSrtGuard(Buffer& buffer) const {
     namespace Abi = ShaderRecompiler::BdaAbi;
     std::uint32_t guard = 0;
-    std::memcpy(&guard, fault->Bytes().data() + Abi::SrtGuardWord * sizeof(std::uint32_t), sizeof(guard));
+    std::memcpy(&guard, buffer.Bytes().data() + Abi::SrtGuardWord * sizeof(std::uint32_t), sizeof(guard));
     if (guard == 0) return;
     const auto stage = guard >> Abi::SrtGuardStageShift;
     const auto record = guard & ((1u << Abi::SrtGuardStageShift) - 1u);
@@ -337,9 +341,9 @@ void BdaResources::checkSrtGuard() const {
     throw std::runtime_error(message.str());
 }
 
-void BdaResources::markWrittenPages() const {
+void BdaResources::markWrittenPages(Buffer& buffer) const {
     namespace Abi = ShaderRecompiler::BdaAbi;
-    auto* words = reinterpret_cast<std::uint32_t*>(fault->Bytes().data());
+    auto* words = reinterpret_cast<std::uint32_t*>(buffer.Bytes().data());
     Require(words[Abi::WrittenOverflowWord] == 0, "more than " + std::to_string(Abi::WrittenPageSlots) + " chunks of " + std::to_string(Abi::WrittenChunkPages) + " pages stored to through the BDA table in one use are not implemented");
     const auto count = words[Abi::WrittenCountWord];
     if (count == 0) return;

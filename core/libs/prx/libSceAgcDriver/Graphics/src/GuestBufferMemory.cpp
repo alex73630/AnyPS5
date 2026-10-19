@@ -162,6 +162,7 @@ AddressSpaceCache& Spaces() {
 
 struct AddressReuseCounts {
     std::atomic<std::uint64_t> proofs{0};
+    std::atomic<std::uint64_t> inFlightReused{0};
     std::atomic<std::uint64_t> movedSnapshotProofs{0};
     std::atomic<std::uint64_t> movedSnapshotCandidates{0};
     std::atomic<std::uint64_t> movedSnapshotReused{0};
@@ -3324,6 +3325,10 @@ void CountAddressReuseProof() {
     ReuseCounts().proofs.fetch_add(1, std::memory_order_relaxed);
 }
 
+void CountInFlightAddressReuse() {
+    ReuseCounts().inFlightReused.fetch_add(1, std::memory_order_relaxed);
+}
+
 void CountAddressReuse(AddressReuse outcome, std::uint64_t proofNs) {
     constexpr std::array names{"reused", "not-reusable", "in-use", "snapshots", "space", "images-or-buffers", "imports", "exception", "moved-buffers"};
     static_assert(names.size() == static_cast<std::size_t>(AddressReuse::Count));
@@ -3344,6 +3349,7 @@ AddressReuseStats AddressReuseCounters() {
     const auto load = [](const std::atomic<std::uint64_t>& counter) { return counter.load(std::memory_order_relaxed); };
     AddressReuseStats stats;
     stats.proofs = load(counts.proofs);
+    stats.inFlightReused = load(counts.inFlightReused);
     stats.movedSnapshotProofs = load(counts.movedSnapshotProofs);
     stats.movedSnapshotCandidates = load(counts.movedSnapshotCandidates);
     stats.movedSnapshotReused = load(counts.movedSnapshotReused);

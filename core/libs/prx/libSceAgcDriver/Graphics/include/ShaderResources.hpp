@@ -203,6 +203,7 @@ public:
         DescriptorCache::SetAllocation fragmentAllocation;
         DescriptorCache::SetAllocation allocation;
         std::vector<Snapshot> snapshots;
+        std::shared_ptr<Buffer> fault;
         ~DrawBindings();
     };
     struct MovedBuffer {
@@ -212,7 +213,7 @@ public:
         std::span<const std::uint32_t> words;
         VkDescriptorBufferInfo view{};
     };
-    std::shared_ptr<DrawBindings> PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved = {}, bool movedOnly = false) const;
+    std::shared_ptr<DrawBindings> PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved = {}, bool movedOnly = false, std::shared_ptr<Buffer> fault = {}) const;
     enum class MoveRefusal : std::size_t { None, Shape, NotGuest, Written, Limit, Inaccessible, Overlap, Bindings, DataPatch, AddressWrites, PendingWrites, StorageWrites, Shadowed, AddressOrigin, AddressOutside, AddressAdjustment, AddressState, NoRecorder, Count };
     struct MoveProof {
         MoveRefusal refusal = MoveRefusal::None;
@@ -296,7 +297,8 @@ public:
     bool InUse() const { return usesInFlight->load(std::memory_order_acquire) != 0; }
     bool ReusesAddressSpace() const { return addressReuse; }
     std::shared_ptr<const void> BeginUse();
-    void CompleteUse();
+    std::shared_ptr<Buffer> UseFaultBuffer() const;
+    void CompleteUse(Buffer* fault = nullptr);
     void EndUse() noexcept;
     // `shaders` are the stages the object was built from, in build order (a recorded draw's vertex
     // and fragment stages, or one compute stage): their bindings are walked like the build did.
@@ -304,7 +306,7 @@ public:
     // and, on a refusal, what failed.
     enum class ProofPath : std::size_t { Fast, OwnRefreshed, Full, Count };
     enum class ProofFailure : std::size_t { None, Imports, Evicted, Pending, Changed, Keys, Other, Count };
-    enum class InFlight : std::uint8_t { Refuse, Probe };
+    enum class InFlight : std::uint8_t { Refuse, Probe, Allow };
     struct ProofReport {
         ProofPath path = ProofPath::Fast;
         ProofFailure failure = ProofFailure::None;

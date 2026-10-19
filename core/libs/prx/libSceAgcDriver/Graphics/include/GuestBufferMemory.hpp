@@ -243,6 +243,7 @@ enum class SnapshotReuseMiss : std::uint8_t { Length, UnsortedLive, UnsortedCopi
 enum class SnapshotMatch : std::uint8_t { Same, Moved, Refused };
 struct AddressReuseStats {
     std::uint64_t proofs = 0;
+    std::uint64_t inFlightReused = 0;
     std::uint64_t movedSnapshotProofs = 0;
     std::uint64_t movedSnapshotCandidates = 0;
     std::uint64_t movedSnapshotReused = 0;
@@ -258,6 +259,7 @@ struct AddressReuseStats {
     std::uint64_t heldImportRefusalsHeld = 0;
 };
 void CountAddressReuseProof();
+void CountInFlightAddressReuse();
 void CountMovedSnapshotProof();
 void CountMovedSnapshotCandidate();
 void CountMovedSnapshotUse(bool reused);
