@@ -310,7 +310,7 @@ void Expect(AgcDriver::VulkanDevice& device, std::uint64_t surface, std::uint32_
     }
 }
 
-void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels) {
+void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels, bool clearInherited) {
     const auto surface = AddressOf(texels);
     DepthAddress = surface + SurfaceBytes;
     std::fill_n(reinterpret_cast<std::uint32_t*>(texels), SurfaceBytes / 4u, 0u);
@@ -322,8 +322,9 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels) {
 
     const std::array<float, 1> sliceTwo{0.375f};
     FillDepth(device, surface, 2, sliceTwo);
+    if (clearInherited) AgcDriver::Graphics::NoteDepthMetadataFill(AddressOf(Htile.data()) + 2u * HtileSliceBytes, HtileSliceBytes, 0u);
     TestDepth(device, surface, 0, Layers);
-    for (std::uint32_t slice = 0; slice < Layers; ++slice) Expect(device, surface, slice, slice == 2 ? 12u : Threads, "a layered draw after a draw into depth slice 2 alone");
+    for (std::uint32_t slice = 0; slice < Layers; ++slice) Expect(device, surface, slice, slice == 2 && !clearInherited ? 12u : Threads, clearInherited ? "a fresh layered target after an HTILE clear of its inherited depth slice" : "a layered draw after a draw into depth slice 2 alone");
 
     std::array<float, Layers> depths{};
     for (std::uint32_t layer = 0; layer < Layers; ++layer) depths[layer] = static_cast<float>(layer + 1u) / 8.0f;
@@ -362,8 +363,10 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels) {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        const bool clearInherited = argc == 2 && std::strcmp(argv[1], "--fresh-htile") == 0;
+        Require(argc == 1 || clearInherited, "expected no arguments or --fresh-htile");
         GuestBlock block;
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
@@ -372,7 +375,7 @@ int main() {
             std::puts("skipped, the device has no VK_EXT_shader_viewport_index_layer");
             return VulkanTestSkipped;
         }
-        Run(*device, block.Data());
+        Run(*device, block.Data(), clearInherited);
         std::puts("layered depth target tests passed");
         return 0;
     } catch (const std::exception& error) {
