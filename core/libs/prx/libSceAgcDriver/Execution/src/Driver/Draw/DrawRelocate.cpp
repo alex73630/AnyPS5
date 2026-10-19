@@ -28,6 +28,46 @@ bool Driver::drawRelocationEnabled() {
     return enabled;
 }
 
+DrawRelocationGate ClassifyDrawRelocationGate(std::span<const DrawProgram> programs, std::span<const ShaderRecompiler::ProgramRole> roles, const DrawEntry& donor, std::uint32_t* frontReasons) {
+    if (frontReasons != nullptr) *frontReasons = 0;
+    if (donor.decode == nullptr || donor.decode->programs.size() != programs.size() || donor.stages.size() != programs.size() || roles.size() != programs.size()) return DrawRelocationGate::Unknown;
+    bool changed = false, frontBlocked = false, laterBlocked = false;
+    std::uint32_t reasons = 0;
+    for (std::size_t stage = 0; stage < programs.size(); ++stage) {
+        if (roles[stage] == ShaderRecompiler::ProgramRole::GeometryBack) continue;
+        const auto& now = programs[stage];
+        const auto& before = donor.decode->programs[stage];
+        if (now.userData.size() != before.userData.size() || now.hiddenUserWords != before.hiddenUserWords || now.snapshot != before.snapshot || now.tailContinuation != before.tailContinuation) return DrawRelocationGate::Unknown;
+        if (now.userData == before.userData) continue;
+        changed = true;
+        if (donor.stages[stage].empty() || donor.stages[stage].front() == nullptr) return DrawRelocationGate::Unknown;
+        const auto& variant = *donor.stages[stage].front();
+        const auto mask = variant.relocatableWords;
+        std::uint32_t wordReasons = 0;
+        const auto note = [&](DrawRelocationBlock reason) { wordReasons |= 1u << static_cast<std::size_t>(reason); };
+        for (std::size_t word = 0; word < now.userData.size(); ++word) {
+            const auto from = before.userData[word], to = now.userData[word];
+            if (from == to) continue;
+            if (word < now.hiddenUserWords) note(DrawRelocationBlock::Hidden);
+            if (word >= 64) note(DrawRelocationBlock::Wide);
+            else if ((mask & (std::uint64_t{1} << word)) == 0) note(DrawRelocationBlock::Untagged);
+            if (from == 0 || to == 0) note(DrawRelocationBlock::Null);
+            if (((from ^ to) & 3u) != 0) note(DrawRelocationBlock::TagChanged);
+        }
+        if (stage == 0) {
+            frontBlocked = wordReasons != 0;
+            if (!variant.tracedUserUse) note(DrawRelocationBlock::EligibilityUnknown);
+            else if (!variant.tracedRelocationEligible) note(DrawRelocationBlock::StageIneligible);
+            if (mask == 0) note(DrawRelocationBlock::NoTaggedWords);
+            reasons = wordReasons;
+        } else laterBlocked |= wordReasons != 0;
+    }
+    if (!changed) return DrawRelocationGate::Unchanged;
+    if (laterBlocked) return DrawRelocationGate::OtherStages;
+    if (frontBlocked && frontReasons != nullptr) *frontReasons = reasons;
+    return frontBlocked ? DrawRelocationGate::FrontOnly : DrawRelocationGate::Eligible;
+}
+
 std::uint64_t Driver::relocatedContentKey(const RelocatableUserWord& word, std::uint32_t value, bool& readable) {
     std::uint64_t hash = 0x9e3779b97f4a7c15ull;
     const auto mix = [&](std::uint64_t mixed) {

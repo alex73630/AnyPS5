@@ -198,6 +198,65 @@ void RelocatingDrawsKeepTheirDonor(bool libraries) {
     Require(relocated.evictions - start.evictions >= 2, mode + ": draws of another vertex shader evicted " + std::to_string(relocated.evictions - start.evictions) + " entries, expected at least 2 (run with APS5_DRAW_CACHE_ENTRIES=2)");
 }
 
+void RelocationWordGateClassifiesDonors() {
+    using namespace AgcDriver::DriverDetail;
+    const std::array roles{ShaderRecompiler::ProgramRole::Main, ShaderRecompiler::ProgramRole::Fragment};
+    auto decode = std::make_shared<DrawDecode>();
+    decode->programs.resize(2);
+    for (auto& program : decode->programs) program.userData = {0x1000u, 0x2000u};
+    DrawEntry donor;
+    donor.decode = decode;
+    donor.stages.resize(2);
+    for (auto& stage : donor.stages) {
+        stage.push_back(std::make_shared<DispatchVariant>());
+        stage.front()->relocatableWords = 1;
+        stage.front()->tracedUserUse = true;
+        stage.front()->tracedRelocationEligible = true;
+    }
+    auto current = decode->programs;
+    const auto check = [&](DrawRelocationGate expected, const char* message) { Require(ClassifyDrawRelocationGate(current, roles, donor) == expected, message); };
+    check(DrawRelocationGate::Unchanged, "identical user words were classified as relocated");
+    current[1].userData[0] = 0x3000u;
+    check(DrawRelocationGate::Eligible, "a tagged aligned base move failed the word gate");
+    current[0].userData[1] = 0x4000u;
+    check(DrawRelocationGate::FrontOnly, "an untagged front-stage word was not the sole blocker");
+    std::uint32_t reasons = 0;
+    const auto reason = [](DrawRelocationBlock value) { return 1u << static_cast<std::size_t>(value); };
+    ClassifyDrawRelocationGate(current, roles, donor, &reasons);
+    Require(reasons == reason(DrawRelocationBlock::Untagged), "an eligible stage's untagged word was misclassified");
+    donor.stages[0].front()->tracedRelocationEligible = false;
+    donor.stages[0].front()->relocatableWords = 0;
+    ClassifyDrawRelocationGate(current, roles, donor, &reasons);
+    Require(reasons == (reason(DrawRelocationBlock::StageIneligible) | reason(DrawRelocationBlock::NoTaggedWords) | reason(DrawRelocationBlock::Untagged)), "whole-stage ineligibility was not separated from an untagged word");
+    donor.stages[0].front()->tracedUserUse = false;
+    ClassifyDrawRelocationGate(current, roles, donor, &reasons);
+    Require((reasons & reason(DrawRelocationBlock::EligibilityUnknown)) != 0 && (reasons & reason(DrawRelocationBlock::StageIneligible)) == 0, "unrecorded eligibility was treated as stage ineligibility");
+    current[1].userData[1] = 0x5000u;
+    check(DrawRelocationGate::OtherStages, "a later-stage word change was not reported");
+    ClassifyDrawRelocationGate(current, roles, donor, &reasons);
+    Require(reasons == 0, "front-only reasons included a draw also blocked by a later stage");
+    current = decode->programs;
+    current[1].userData[0] = 0x3001u;
+    check(DrawRelocationGate::OtherStages, "a changed base tag passed the gate");
+    current[1].userData[0] = 0;
+    check(DrawRelocationGate::OtherStages, "a null base passed the gate");
+    current[1].userData[0] = 0x3000u;
+    current[1].hiddenUserWords = decode->programs[1].hiddenUserWords = 1;
+    check(DrawRelocationGate::OtherStages, "a hidden user word passed the gate");
+    current[1].hiddenUserWords = decode->programs[1].hiddenUserWords = 0;
+    donor.stages[1].clear();
+    check(DrawRelocationGate::Unknown, "a missing captured stage was treated as a known donor");
+    donor.stages[1].push_back(std::make_shared<DispatchVariant>());
+    donor.stages[1].front()->relocatableWords = ~std::uint64_t{0};
+    current[1].userData.resize(65, 0);
+    decode->programs[1].userData.resize(65, 0);
+    current[1].userData[0] = decode->programs[1].userData[0];
+    current[1].userData[64] = 0x4000u;
+    check(DrawRelocationGate::OtherStages, "a word outside the relocation mask passed the gate");
+    current[1].userData.pop_back();
+    check(DrawRelocationGate::Unknown, "different user-word layouts passed the gate");
+}
+
 void SplitRunsNameTheirSharedWords() {
     alignas(16) static std::array<std::uint32_t, 4> data{1u, 2u, 3u, 4u};
     auto table = std::make_shared<ShaderRecompiler::SrtGuestWords>();
@@ -295,7 +354,10 @@ int main(int argc, char** argv) {
     try {
         const bool evicted = argc == 2 && std::string(argv[1]) == "--evicted";
         const bool kept = argc == 2 && std::string(argv[1]) == "--kept";
-        if (!evicted && !kept) SplitRunsNameTheirSharedWords();
+        if (!evicted && !kept) {
+            RelocationWordGateClassifiesDonors();
+            SplitRunsNameTheirSharedWords();
+        }
         bool libraries = false;
         {
             const auto device = OpenVulkanTestDevice();

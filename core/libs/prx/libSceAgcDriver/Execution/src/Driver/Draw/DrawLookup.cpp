@@ -231,6 +231,22 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
             }
         } else if (dataEntry != nullptr && graphics.stages.path == Graphics::ShaderPath::Vertex && dataEntry->stages.size() == programs.size() && dataEntry->decode->programs.size() == programs.size()) {
             PerformanceTrace::Count("DrawShaderLookup", "data-entry");
+            if (traceDrawCache()) {
+                std::uint32_t frontReasons = 0;
+                const auto gate = ClassifyDrawRelocationGate(programs, roles, *dataEntry, &frontReasons);
+                constexpr std::array names{"unchanged", "eligible", "front-only-blocked", "later-stage-blocked", "unknown"};
+                static_assert(names.size() == static_cast<std::size_t>(DrawRelocationGate::Count));
+                PerformanceTrace::Count("DrawRelocationGate", names[static_cast<std::size_t>(gate)]);
+                std::lock_guard cacheLock(drawCacheMutex);
+                ++drawEntryCounters.relocationGates[static_cast<std::size_t>(gate)];
+                constexpr std::array blocks{"stage-ineligible", "eligibility-unknown", "no-tagged-words", "untagged", "null", "tag-changed", "hidden", "wide"};
+                static_assert(blocks.size() == static_cast<std::size_t>(DrawRelocationBlock::Count));
+                for (std::size_t reason = 0; reason < blocks.size(); ++reason) {
+                    if ((frontReasons & (1u << reason)) == 0) continue;
+                    ++drawEntryCounters.relocationFrontBlocks[reason];
+                    PerformanceTrace::Count("DrawRelocationFrontBlock", blocks[reason]);
+                }
+            }
             std::uint64_t imagesFlushed = 0, runsSynced = 0;
             const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::DrawCache);
             std::optional<SampledReadScope> sampling;
