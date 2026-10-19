@@ -2653,7 +2653,9 @@ void ShaderResources::noteReusable() {
     if (!multisampleSources.empty()) return refused(ResourceCache::Admission::Multisample);
     if (bda != nullptr && LoopGuardEnabled()) return refused(ResourceCache::Admission::LoopGuard);
     if (addressBased && std::any_of(tableStages.begin(), tableStages.end(), [](const TableStage& table) { return std::find(table.elementTextures.begin(), table.elementTextures.end(), std::numeric_limits<std::size_t>::max()) != table.elementTextures.end(); })) return refused(ResourceCache::Admission::UnresolvedTable);
-    if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) return refused(ResourceCache::Admission::RefreshedTexture);
+    refreshesPerUse = std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); });
+    static const bool noRefreshedDrawReuse = std::getenv("APS5_NO_REFRESHED_DRAW_REUSE") != nullptr;
+    if (refreshesPerUse && (!drawBuild || noRefreshedDrawReuse)) return refused(ResourceCache::Admission::RefreshedTexture);
     if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return refused(ResourceCache::Admission::LargeData);
     const auto regions = addressBased ? guestMemory.SpaceRegions() : guestMemory.DirectRegions();
     if (!regions.has_value()) return refused(ResourceCache::Admission::Regions);
@@ -2893,7 +2895,7 @@ namespace {
 // of the reused ones, fast = every image proved current from stamps, full = the lookups were repeated.
 // Why the fast path left an object to the full walk (the "fast-fail by reason" counts).
 using FastFail = ShaderResources::FastFail;
-constexpr std::array<const char*, static_cast<std::size_t>(FastFail::Count)> FastFailNames{"no record", "collect", "pending image", "evicted image", "memory changed", "keys", "cleared view", "storage keys", "depth surface", "replaced texture", "audit"};
+constexpr std::array<const char*, static_cast<std::size_t>(FastFail::Count)> FastFailNames{"no record", "collect", "pending image", "evicted image", "memory changed", "keys", "cleared view", "storage keys", "depth surface", "replaced texture", "audit", "refreshed per use"};
 using OwnRefreshFallback = ShaderResources::OwnRefreshFallback;
 constexpr std::array<const char*, static_cast<std::size_t>(OwnRefreshFallback::Count)> OwnRefreshFallbackNames{"disabled", "snapshot texture", "cleared view", "foreign view", "surface key", "not imported", "uncached", "re-run failed"};
 
@@ -3671,12 +3673,13 @@ bool ShaderResources::proveBuild(std::span<const CompiledShader> shaders, ProofR
     };
     thread_local std::vector<PendingOverlap>* overlappingSlot = nullptr;
     auto& overlapping = ShaderRecompiler::ThreadOwned(overlappingSlot);
+    overlapping.clear();
     thread_local std::vector<PendingOverlap>* refreshedSlot = nullptr;
     auto& refreshed = ShaderRecompiler::ThreadOwned(refreshedSlot);
     refreshed.clear();
-    FastFail reason = FastFail::Count;
+    FastFail reason = refreshesPerUse ? FastFail::RefreshedPerUse : FastFail::Count;
     bool accepted = false;
-    bool fast = !noFast && fastRevalidate(serialBefore, refreshed, reason, overlapping, accepted);
+    bool fast = !refreshesPerUse && !noFast && fastRevalidate(serialBefore, refreshed, reason, overlapping, accepted);
     // T1 (design_cpu_final M3, rule RT1): a Pending failure whose overlapping images are foreign
     // to the surfaces is resolved by the own objects' refresh (what the walk's lookups would do to
     // them) and the fast proof run again, which is then authoritative (it accepts what stays

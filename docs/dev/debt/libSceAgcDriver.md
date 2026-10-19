@@ -1,5 +1,7 @@
 # libSceAgcDriver technical debt
 
+- Draw resources containing refreshed depth-plane or normalized stencil copies repeat all image lookups before reusing descriptors. Dispatches and multisampled depth builds remain excluded; multisample reuse would also need to repeat its owner validation and attachment-to-sampling barrier. `APS5_NO_REFRESHED_DRAW_REUSE=1` retains the previous refusal for comparison. The depth-plane transfer regression checks guest writes, depth writes and removed owners, and the stencil regression checks refreshes after plane fills. Cross-vendor behavior and title frame-time changes are not yet measured.
+
 ### Silent stubs
 
 - [sceAgcDriverRegisterDefaultOwner](../../../core/libs/prx/libSceAgcDriver/Unimplemented.cpp) (libSceAgcDriver) - takes one uint32 owner by value (OpenAGC `include/agcdriver.h`, SharpEmu `AgcExports.DriverResources.cs`) and returns 0 without recording it. PPSA21480 treats the code 0x8A6C9018 it returned before as fatal. Console behaviour is unverified: OpenAGC describes the function as a firmware 5.50 stub that returns 0x8A6C9018, SharpEmu returns 0
