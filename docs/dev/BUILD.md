@@ -144,6 +144,26 @@ python3 tools/check_compile.py --build build-relinker core/relinker/main.cpp
 
 Real compile errors still fail. Syntax checks do not replace a full build and test run.
 
+## Optional Linux host allocator
+
+The bundled mimalloc submodule provides an optional `mimalloc` target on Linux. Build it explicitly, then preload it for one converted executable:
+
+```sh
+cmake --build build --target mimalloc --parallel
+anyps5_allocator="$(realpath build/3rdparty/mimalloc/libmimalloc.so)"
+cd /path/to/game
+env LD_PRELOAD="$anyps5_allocator" ./app.elf
+```
+
+Use the game's usual runtime directory. This replaces the process's host allocation functions. The `libs` target does not build or link this allocator, and omitting `LD_PRELOAD` retains the system allocator. In a Debug build the library is named `libmimalloc-debug.so`.
+
+When debugging, set `LD_PRELOAD` in GDB before starting the inferior so the debugger itself keeps its normal allocator:
+
+```text
+set environment LD_PRELOAD=/absolute/path/to/build/3rdparty/mimalloc/libmimalloc.so
+run
+```
+
 ## Write watch tests
 
 The macOS write watch can be built and tested separately, without submodules or the prx libraries:
