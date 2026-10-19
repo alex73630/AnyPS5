@@ -2824,7 +2824,13 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
     // A build this recorded draw can share with later identical ones goes into the cache (a cache
     // hit is reusable by construction, so `recorded` holds for it; one with completion work is
     // never reusable).
-    if (cacheable && built != nullptr && recorded && resources->Reusable()) SharedResourceCache().Insert(contentKey, resources);
+    if (cacheable && built != nullptr && recorded && resources->Reusable()) {
+        ResourceCache::CountAdmission(ResourceCache::Admission::Attempt, resources->UsesAddressTable());
+        SharedResourceCache().Insert(contentKey, resources);
+    } else {
+        const auto reason = built == nullptr ? ResourceCache::Admission::NoBuild : !cacheable ? ResourceCache::Admission::Uncacheable : !recorded ? ResourceCache::Admission::Unrecorded : ResourceCache::Admission::NotReusable;
+        ResourceCache::CountAdmission(reason, resources->UsesAddressTable());
+    }
     // A recorded draw renders into its resident targets in the general layout (recordDraw). Debug
     // aid: APS5_DRAW_TRANSITIONS=1 keeps the per-draw upload and download barriers, the layout
     // transitions of every target and one pass per draw, as before.

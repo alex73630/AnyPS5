@@ -718,6 +718,12 @@ private:
 // teardown before its descriptor caches go.
 class ResourceCache {
 public:
+    enum class Admission {
+        CopiedWrites, Lease, Multisample, LoopGuard, UnresolvedTable, RefreshedTexture,
+        LargeData, Regions, Serial, Reusable, NoBuild, Uncacheable, Unrecorded,
+        NotReusable, Attempt, UncachedStorage, ReleasedTexture, Inserted, Replaced, Evicted, Count
+    };
+    static void CountAdmission(Admission reason, bool addressBased);
     using Key = std::vector<std::uint32_t>;
     std::shared_ptr<ShaderResources> Find(const Key& key);
     // `evicted`, when given, receives the objects the insert displaces (the entry replaced under the
