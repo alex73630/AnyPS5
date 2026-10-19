@@ -2650,7 +2650,7 @@ void ShaderResources::noteReusable() {
     };
     if (guestMemory.HasCopiedWrites()) return refused(ResourceCache::Admission::CopiedWrites);
     if (!addressBased && (HoldsLease() || usesBda)) return refused(ResourceCache::Admission::Lease);
-    if (!multisampleSources.empty()) return refused(ResourceCache::Admission::Multisample);
+    if (!multisampleSources.empty() || refreshedMultisample) return refused(ResourceCache::Admission::Multisample);
     if (bda != nullptr && LoopGuardEnabled()) return refused(ResourceCache::Admission::LoopGuard);
     if (addressBased && std::any_of(tableStages.begin(), tableStages.end(), [](const TableStage& table) { return std::find(table.elementTextures.begin(), table.elementTextures.end(), std::numeric_limits<std::size_t>::max()) != table.elementTextures.end(); })) return refused(ResourceCache::Admission::UnresolvedTable);
     refreshesPerUse = std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); });
@@ -5261,6 +5261,7 @@ void ShaderResources::resolveImageTables() {
             samplerKey.push_back((source.compareEnable ? 1u : 0u) | (source.unnormalized ? 2u : 0u) | (source.integerBorder ? 4u : 0u));
         }
         const auto place = [&](std::uint32_t element, std::shared_ptr<Texture> texture, const GuestTextureResource& resource, std::uint64_t guestBytes, bool firstLayer) {
+            refreshedMultisample |= resource.dimension == TextureDimension::k2DMsaa && texture->RefreshedPerUse();
             textures.push_back(std::move(texture));
             textureFirstLayer.push_back(firstLayer);
             describedRanges.push_back({"texture", resource.baseAddress, guestBytes, resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), resource.dccAddress, true});
