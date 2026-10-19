@@ -1726,8 +1726,6 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
         static const bool inFlightReuse = std::getenv("APS5_NO_IN_FLIGHT_DRAW_REUSE") == nullptr;
         static const bool probe = std::getenv("APS5_PROBE_IN_FLIGHT_REUSE") != nullptr;
         const bool shared = inUse && inFlightReuse && !probe && cached->ReusesAddressSpace();
-        const auto* activeRecorder = Recorder::Active();
-        const bool sharedBatch = shared && activeRecorder != nullptr && cached->LastRecordedSerial() == activeRecorder->OpenSerial();
         buildReason = inUse ? "DrawResources.build.in-use" : "DrawResources.build.miss";
         if (inUse) {
             if (!shared) CountAddressReuse(AddressReuse::InUse);
@@ -1772,9 +1770,6 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             if (moved.has_value()) {
                 if (shared) {
                     resolved.fault = cached->UseFaultBuffer();
-                    CountInFlightAddressReuse();
-                    PerformanceTrace::Count("DrawResources", "reused-in-flight");
-                    PerformanceTrace::Count("DrawResources", sharedBatch ? "reused-in-flight-same-batch" : "reused-in-flight-other-batch");
                 }
                 PerformanceTrace::Count("DrawResources", "reused");
                 resolved.resources = std::move(cached);
@@ -2019,6 +2014,7 @@ struct Kept {
 // the GPU write notes, the copied-buffer write-back (listed in DrawCopiedWriters or run as a
 // completion action) and the targets marked dirty.
 void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>& resources, std::shared_ptr<Pipeline> pipeline, std::shared_ptr<Framebuffer> framebuffer, DrawInputs& inputs, std::vector<std::shared_ptr<StorageTexture>> targets, std::vector<std::pair<std::uint32_t, std::uint32_t>> slices, std::unique_ptr<DeviceBuffer> scratch, std::function<void()> checkRecords, bool listed, bool completion, const DrawOutcome& outcome, std::shared_ptr<Buffer> fault = {}) {
+    Require(fault == nullptr || (completion && !(listed && resources->HasCopiedWrites())), "a per-use fault buffer requires its own completion");
     auto kept = std::make_shared<Kept>();
     kept->resources = resources;
     kept->pipeline = std::move(pipeline);
@@ -2040,6 +2036,12 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
     // next serial), or waited for by the caller (any wait releases it at once).
     if (resources->HoldsLease()) CountLeaseOutcome(outcome.waited, outcome.waited ? 0 : recorder.Submissions() + 1);
     // Every use of a (possibly shared) resources object registers its GPU writes anew.
+    if (fault != nullptr) {
+        CountInFlightAddressReuse();
+        PerformanceTrace::Count("DrawResources", "reused-in-flight");
+        PerformanceTrace::Count("DrawResources", resources->LastRecordedSerial() == recorder.OpenSerial() ? "reused-in-flight-same-batch" : "reused-in-flight-other-batch");
+        if (resources->TableElements() != 0) PerformanceTrace::Count("DrawResources", "reused-in-flight-with-tables");
+    }
     resources->MarkGpuWrites(recorder);
     // The write-back (fault check, copied buffers) runs when the batch completed; a fault is
     // reported by the recorder ("deferred write-back failed") instead of thrown out of the draw.
