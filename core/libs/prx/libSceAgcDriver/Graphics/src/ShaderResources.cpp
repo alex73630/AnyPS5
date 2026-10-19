@@ -2645,12 +2645,18 @@ void ShaderResources::noteReusable() {
     directRegions.clear();
     addressWrites.clear();
     const bool addressBased = usesBda && drawBuild && AddressReuseEnabled();
-    if (guestMemory.HasCopiedWrites() || (!addressBased && (HoldsLease() || usesBda)) || !multisampleSources.empty() || (bda != nullptr && LoopGuardEnabled())) return;
-    if (addressBased && std::any_of(tableStages.begin(), tableStages.end(), [](const TableStage& table) { return std::find(table.elementTextures.begin(), table.elementTextures.end(), std::numeric_limits<std::size_t>::max()) != table.elementTextures.end(); })) return;
-    if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) return;
-    if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return;
+    const auto refused = [&](ResourceCache::Admission reason) {
+        if (drawBuild) ResourceCache::CountAdmission(reason, usesBda);
+    };
+    if (guestMemory.HasCopiedWrites()) return refused(ResourceCache::Admission::CopiedWrites);
+    if (!addressBased && (HoldsLease() || usesBda)) return refused(ResourceCache::Admission::Lease);
+    if (!multisampleSources.empty()) return refused(ResourceCache::Admission::Multisample);
+    if (bda != nullptr && LoopGuardEnabled()) return refused(ResourceCache::Admission::LoopGuard);
+    if (addressBased && std::any_of(tableStages.begin(), tableStages.end(), [](const TableStage& table) { return std::find(table.elementTextures.begin(), table.elementTextures.end(), std::numeric_limits<std::size_t>::max()) != table.elementTextures.end(); })) return refused(ResourceCache::Admission::UnresolvedTable);
+    if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) return refused(ResourceCache::Admission::RefreshedTexture);
+    if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return refused(ResourceCache::Admission::LargeData);
     const auto regions = addressBased ? guestMemory.SpaceRegions() : guestMemory.DirectRegions();
-    if (!regions.has_value()) return;
+    if (!regions.has_value()) return refused(ResourceCache::Admission::Regions);
     for (const auto& [begin, end] : *regions) {
         // No reconcile here: the upload just took these imports, and the set is about to be recorded
         // against them.
@@ -2658,7 +2664,7 @@ void ShaderResources::noteReusable() {
         // Read-only image mirrors (exe ranges) are as stable as imports; their serials have the top
         // bit set, so the two spaces never collide.
         if (serial == 0) serial = ImageMirrorSerial(context, begin, static_cast<std::size_t>(end - begin));
-        if (serial == 0) return;
+        if (serial == 0) return refused(ResourceCache::Admission::Serial);
         directRegions.push_back({begin, end, serial});
     }
     for (const auto& cut : guestMemory.CutRegions()) {
@@ -2671,6 +2677,7 @@ void ShaderResources::noteReusable() {
     if (addressBased) addressWrites = guestMemory.DirectWrites();
     reusable = true;
     addressReuse = addressBased;
+    if (drawBuild) ResourceCache::CountAdmission(ResourceCache::Admission::Reusable, usesBda);
 }
 
 std::uint64_t ShaderResources::DepthGuardRefusals() {
@@ -3973,6 +3980,37 @@ void traceMiss(ChurnProfile& churn, bool draw, std::uint64_t variants, const Con
 
 }
 
+namespace {
+
+using AdmissionCounts = std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(ResourceCache::Admission::Count)>;
+
+std::array<AdmissionCounts, 2>& DrawAdmissionCounts() {
+    static std::array<AdmissionCounts, 2> counts{};
+    return counts;
+}
+
+void ReportDrawAdmission() {
+    constexpr std::array names{"copied-writes", "lease", "multisample", "loop-guard", "unresolved-table", "refreshed-texture", "large-data", "regions", "serial", "reusable", "no-build", "uncacheable", "unrecorded", "not-reusable", "attempt", "uncached-storage", "released-texture", "inserted", "replaced", "evicted"};
+    static_assert(names.size() == static_cast<std::size_t>(ResourceCache::Admission::Count));
+    auto& counts = DrawAdmissionCounts();
+    for (std::size_t kind = 0; kind < counts.size(); ++kind) {
+        std::string line = std::string("[rescache] draw admission (10 s, ") + (kind == 0 ? "direct" : "address") + "):";
+        for (std::size_t reason = 0; reason < names.size(); ++reason) {
+            const auto count = counts[kind][reason].exchange(0, std::memory_order_relaxed);
+            line += " " + std::string(names[reason]) + "=" + std::to_string(count);
+        }
+        AgcDriver::ProfilePrint_nid_no_patch("%s\n", line.c_str());
+    }
+}
+
+}
+
+void ResourceCache::CountAdmission(Admission reason, bool addressBased) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!profile) return;
+    DrawAdmissionCounts()[addressBased ? 1 : 0][static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
+}
+
 void ResourceCache::noteMiss(const Key& key) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     static const bool trace = std::getenv("APS5_TRACE_RESOURCE_KEY_MISSES") != nullptr;
@@ -4059,6 +4097,7 @@ void ResourceCache::noteMiss(const Key& key) {
     if (profile) {
         report("dispatch", churn.dispatch);
         report("draws", churn.draws);
+        ReportDrawAdmission();
     }
     const auto keyMiss = [](const char* what, KeyMissWindow& window) {
         const auto count = [](std::uint64_t value) { return static_cast<unsigned long long>(value); };
@@ -4075,12 +4114,19 @@ void ResourceCache::noteMiss(const Key& key) {
 void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> resources, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
     std::lock_guard lock(mutex);
     dropReleasedTextures(evicted);
-    if (!resources->HasCachedStorageImages() || resources->HoldsReleasedTexture()) return;
+    const bool draw = !key.empty() && key[0] == 0xffffffffu;
+    const auto count = [&](Admission reason) {
+        if (draw) CountAdmission(reason, resources->UsesAddressTable());
+    };
+    if (!resources->HasCachedStorageImages()) return count(Admission::UncachedStorage);
+    if (resources->HoldsReleasedTexture()) return count(Admission::ReleasedTexture);
     if (const auto found = index.find(key); found != index.end()) {
+        count(Admission::Replaced);
         if (evicted != nullptr) evicted->push_back(std::move(found->second->second));
         entries.erase(found->second);
         index.erase(found);
     }
+    count(Admission::Inserted);
     entries.emplace_front(key, std::move(resources));
     index.emplace(key, entries.begin());
     if (capacity == 0) {
@@ -4091,6 +4137,7 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
     }
     noteUse(key);
     while (entries.size() > capacity) {
+        if (!entries.back().first.empty() && entries.back().first[0] == 0xffffffffu) CountAdmission(Admission::Evicted, entries.back().second->UsesAddressTable());
         noteEvicted(entries.back().first);
         if (evicted != nullptr) evicted->push_back(std::move(entries.back().second));
         index.erase(entries.back().first);
