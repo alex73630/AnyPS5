@@ -304,12 +304,14 @@ public:
     // and, on a refusal, what failed.
     enum class ProofPath : std::size_t { Fast, OwnRefreshed, Full, Count };
     enum class ProofFailure : std::size_t { None, Imports, Evicted, Pending, Changed, Keys, Other, Count };
+    enum class InFlight : std::uint8_t { Refuse, Probe };
     struct ProofReport {
         ProofPath path = ProofPath::Fast;
         ProofFailure failure = ProofFailure::None;
         bool movedSnapshots = false;
+        AddressReuse refusal = AddressReuse::Count;
     };
-    bool Revalidate(std::span<const CompiledShader> shaders, ProofReport* report = nullptr, std::span<const GuestMemorySnapshot> snapshots = {});
+    bool Revalidate(std::span<const CompiledShader> shaders, ProofReport* report = nullptr, std::span<const GuestMemorySnapshot> snapshots = {}, InFlight inFlight = InFlight::Refuse);
     static bool EpochProofs();
     bool Revalidate(const CompiledShader& shader, ProofReport* report = nullptr) { return Revalidate(std::span<const CompiledShader>(&shader, 1), report); }
     // The proof a recipe hit runs on its template (design_cpu_final M4): Revalidate by that name.
