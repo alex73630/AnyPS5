@@ -2605,6 +2605,19 @@ bool DataRole(ShaderRecompiler::DescriptorRole role) {
     return role == ShaderRecompiler::DescriptorRole::ShaderData || role == ShaderRecompiler::DescriptorRole::FlattenedSrt;
 }
 
+constexpr std::array ContentKeyFlags{
+    &ShaderRecompiler::DescriptorBinding::imageWritten,
+    &ShaderRecompiler::DescriptorBinding::samplerDepthCompare,
+    &ShaderRecompiler::DescriptorBinding::imageDepthCompare,
+    &ShaderRecompiler::DescriptorBinding::imageAtomic,
+    &ShaderRecompiler::DescriptorBinding::samplerUnnormalized,
+    &ShaderRecompiler::DescriptorBinding::samplerIntegerBorder,
+    &ShaderRecompiler::DescriptorBinding::samplerCoordinatesIgnored,
+    &ShaderRecompiler::DescriptorBinding::imageUnnormalized,
+    &ShaderRecompiler::DescriptorBinding::imageUnnormalizedBaseLevel,
+    &ShaderRecompiler::DescriptorBinding::bufferWritten
+};
+
 // The largest data buffer vkCmdUpdateBuffer refreshes; a template with a bigger one is not reused.
 constexpr std::size_t MaxRefreshBytes = 65536;
 
@@ -2751,18 +2764,9 @@ void VisitContentKey(const CompiledShader& shader, bool dataWords, bool movableB
         } else if ((dataWords && !movableBuffers) || !DataRole(binding.role)) {
             for (const auto word : binding.guestDescriptor) visit(word);
         }
-        packBits(binding.imageWritten);
-        packBits(binding.samplerDepthCompare);
-        packBits(binding.imageDepthCompare);
-        packBits(binding.imageAtomic);
-        packBits(binding.samplerUnnormalized);
-        packBits(binding.samplerIntegerBorder);
-        packBits(binding.samplerCoordinatesIgnored);
-        packBits(binding.imageUnnormalized);
-        packBits(binding.imageUnnormalizedBaseLevel);
         // Read-only elements are bound without a write set: an object built for one written set
         // must not serve a build with another (the variant implies it, this makes it explicit).
-        packBits(binding.bufferWritten);
+        for (const auto flags : ContentKeyFlags) packBits(binding.*flags);
         visit(static_cast<std::uint32_t>(binding.imageSamplers.size()));
         for (const auto sampler : binding.imageSamplers) visit(sampler);
         visit(static_cast<std::uint32_t>(binding.imageShapes.size()));
@@ -2788,7 +2792,10 @@ void ShaderResources::AppendContentKey(const CompiledShader& shader, bool dataWo
         addWords(binding.imageSamplers.size());
         addWords(binding.imageShapes.size());
         if ((dataWords && !movableBuffers) || !DataRole(binding.role)) addWords(binding.guestDescriptor.size());
-        for (const auto* bits : {&binding.imageWritten, &binding.samplerDepthCompare, &binding.imageDepthCompare, &binding.imageAtomic, &binding.samplerUnnormalized, &binding.samplerIntegerBorder, &binding.samplerCoordinatesIgnored, &binding.imageUnnormalized, &binding.imageUnnormalizedBaseLevel, &binding.bufferWritten}) addWords(bits->size() / 32u + (bits->size() % 32u != 0 ? 1u : 0u));
+        for (const auto flags : ContentKeyFlags) {
+            const auto& bits = binding.*flags;
+            addWords(bits.size() / 32u + (bits.size() % 32u != 0 ? 1u : 0u));
+        }
     }
     key.reserve(words);
     VisitContentKey(shader, dataWords, movableBuffers, [&](std::uint32_t word) { key.push_back(word); });
@@ -2824,7 +2831,7 @@ bool LabelShaderKey(std::span<const std::uint32_t> key, std::size_t at, std::siz
             labels[at + i] = static_cast<std::uint8_t>(component);
         }
         at += words;
-        for (int flags = 0; flags < 9; ++flags) {
+        for (std::size_t flags = 0; flags < ContentKeyFlags.size(); ++flags) {
             if (at >= end) return false;
             const auto count = 1 + (static_cast<std::size_t>(key[at]) + 31) / 32;
             if (!label(at, count, Component::Other)) return false;
@@ -3869,7 +3876,7 @@ ChurnProfile& Churn() {
 
 // Charges word `diff` of `key` to the binding of the ContentKey that starts at `at` (the layout of
 // ShaderResources::ContentKey), moving `at` past that key; false when `diff` lies beyond it.
-bool chargeShaderKey(ChurnCounts& profile, const ResourceCache::Key& key, std::size_t& at, std::size_t diff) {
+bool chargeShaderKey(ChurnCounts& profile, const ResourceCache::Key& key, std::size_t& at, std::size_t diff, bool movable = false) {
     if (at + 5 > key.size() || diff < at + 5) {
         ++profile.layout;
         return true;
@@ -3884,7 +3891,7 @@ bool chargeShaderKey(ChurnCounts& profile, const ResourceCache::Key& key, std::s
         }
         const auto kind = key[at];
         const auto role = key[at + 1];
-        const auto descriptorWords = dataWords || !DataRole(static_cast<ShaderRecompiler::DescriptorRole>(role)) ? key[at + 7] : 0u;
+        const auto descriptorWords = (dataWords && !movable) || !DataRole(static_cast<ShaderRecompiler::DescriptorRole>(role)) ? key[at + 7] : 0u;
         at += 8;
         if (diff < at + descriptorWords) {
             if (role < profile.roles.size()) ++profile.roles[role];
@@ -3894,12 +3901,24 @@ bool chargeShaderKey(ChurnCounts& profile, const ResourceCache::Key& key, std::s
             return true;
         }
         at += descriptorWords;
-        for (int flags = 0; flags < 4; ++flags) {
+        for (std::size_t flags = 0; flags < ContentKeyFlags.size(); ++flags) {
             if (at >= key.size()) {
                 ++profile.layout;
                 return true;
             }
             const auto words = 1 + (static_cast<std::size_t>(key[at]) + 31) / 32;
+            if (diff < at + words) {
+                ++profile.layout;
+                return true;
+            }
+            at += words;
+        }
+        for (int list = 0; list < 2; ++list) {
+            if (at >= key.size()) {
+                ++profile.layout;
+                return true;
+            }
+            const auto words = 1 + static_cast<std::size_t>(key[at]);
             if (diff < at + words) {
                 ++profile.layout;
                 return true;
@@ -4033,6 +4052,7 @@ void ResourceCache::CountAdmission(Admission reason, bool addressBased) {
 void ResourceCache::noteMiss(const Key& key) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     static const bool trace = std::getenv("APS5_TRACE_RESOURCE_KEY_MISSES") != nullptr;
+    static const bool movable = std::getenv("APS5_NO_MOVED_BUFFER_TEMPLATES") == nullptr;
     if ((!profile && !trace) || key.size() < 5) return;
     // The variant(s) the key belongs to: a compute key starts with the data-words flag, the stage
     // and its variant, a draw key with a marker, the device and its stages' keys (Draw.cpp
@@ -4069,7 +4089,7 @@ void ResourceCache::noteMiss(const Key& key) {
             bool charged = false;
             for (std::uint32_t stage = 0; stage < key[3] && at < key.size() && !charged; ++stage) {
                 ++at;
-                charged = chargeShaderKey(counts, key, at, diff);
+                charged = chargeShaderKey(counts, key, at, diff, movable);
             }
             if (!charged) ++counts.drawWords;
         } else {
