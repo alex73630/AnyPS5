@@ -431,9 +431,9 @@ bool SrtTape::compute(Frame& frame, const Node& node, std::uint64_t& result) con
                 frame.nullRoot = true;
                 return false;
             }
-            if (frame.runtime.userDataUse != nullptr) frame.runtime.userDataUse->reads.emplace_back(address, origin);
+            if (frame.runtime.logReads && frame.runtime.userDataUse != nullptr) frame.runtime.userDataUse->reads.emplace_back(address, origin);
             if (node.loaded && frame.runtime.accessible != nullptr && !frame.runtime.accessible(frame.runtime.userContext, address, sizeof(std::uint32_t))) return false;
-            if (auto* trace = frame.runtime.readTrace; trace != nullptr) {
+            if (auto* trace = frame.runtime.readTrace; frame.runtime.logReads && trace != nullptr) {
                 if (node.source == trace->leaf) trace->leaves.emplace_back(trace->leafSlot, address);
                 else trace->otherReads.push_back(address);
             }

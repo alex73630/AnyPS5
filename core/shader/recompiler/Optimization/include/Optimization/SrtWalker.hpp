@@ -87,6 +87,7 @@ struct SrtRuntime {
     SrtMemoryUnchanged unchangedSince = nullptr;
     SrtMemorySupplier supplyWords = nullptr;
     SrtUserDataUse* userDataUse = nullptr;
+    bool logReads = true;
 };
 
 enum class RuntimeValueType {
