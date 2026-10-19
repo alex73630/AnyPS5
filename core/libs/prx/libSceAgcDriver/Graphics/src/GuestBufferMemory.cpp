@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
@@ -3324,6 +3325,9 @@ void CountAddressReuseProof() {
 }
 
 void CountAddressReuse(AddressReuse outcome, std::uint64_t proofNs) {
+    constexpr std::array names{"reused", "not-reusable", "in-use", "snapshots", "space", "images-or-buffers", "imports", "exception", "moved-buffers"};
+    static_assert(names.size() == static_cast<std::size_t>(AddressReuse::Count));
+    PerformanceTrace::Count("AddressReuse", names[static_cast<std::size_t>(outcome)]);
     auto& counts = ReuseCounts();
     counts.outcomes[static_cast<std::size_t>(outcome)].fetch_add(1, std::memory_order_relaxed);
     if (outcome != AddressReuse::Reused && proofNs != 0) counts.refusedProofNs.fetch_add(proofNs, std::memory_order_relaxed);

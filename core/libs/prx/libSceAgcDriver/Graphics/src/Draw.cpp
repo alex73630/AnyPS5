@@ -1176,10 +1176,12 @@ struct DrawTimer {
     bool profile;
     std::chrono::steady_clock::time_point phaseStart;
     std::array<double, PhaseCount> us{};
+    TraceThread* trace = PerformanceTrace::DetailedThread();
     explicit DrawTimer(bool profile) : profile(profile), phaseStart(std::chrono::steady_clock::now()) {}
     void phase(DrawPhase which) {
-        if (!profile) return;
+        if (!profile && trace == nullptr) return;
         const auto now = std::chrono::steady_clock::now();
+        if (trace != nullptr) trace->Measure("Draw.Phase", DrawPhaseNames[which], phaseStart, now);
         us[which] += std::chrono::duration<double, std::micro>(now - phaseStart).count();
         phaseStart = now;
     }
@@ -1720,7 +1722,10 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
         resolved.contentKey = DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
         auto cached = SharedResourceCache().Find(resolved.contentKey);
         const bool inUse = cached != nullptr && cached->InUse();
-        if (inUse) CountAddressReuse(AddressReuse::InUse);
+        if (inUse) {
+            CountAddressReuse(AddressReuse::InUse);
+            PerformanceTrace::Count("DrawResources", "in-use");
+        }
         if (cached != nullptr && !inUse) {
             const bool addressBased = cached->ReusesAddressSpace();
             const auto proofStart = addressBased && timer.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -1733,6 +1738,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             moveProof.refusal = ShaderResources::MoveRefusal::NoRecorder;
             if (valid && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder, &moveProof);
             if (moved.has_value()) {
+                PerformanceTrace::Count("DrawResources", "reused");
                 resolved.resources = std::move(cached);
                 resolved.moved = std::move(*moved);
                 if (trimKey || !resolved.moved.empty()) CheckBufferAliases(context, shaders, state.color, draw.indexAddress, indexBytes);
@@ -1746,6 +1752,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 }
                 if (proof.movedSnapshots) CountMovedSnapshotUse(true);
             } else if (valid) {
+                PerformanceTrace::Count("DrawResources", "buffer-move-refused");
                 if (addressBased && timer.profile) {
                     auto& stats = Profile();
                     std::lock_guard lock(stats.mutex);
@@ -1758,14 +1765,17 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 countCache(&DrawProfile::cacheMisses);
             } else {
                 SharedResourceCache().Remove(resolved.contentKey);
+                PerformanceTrace::Count("DrawResources", "invalidated");
                 countCache(&DrawProfile::cacheInvalidated);
             }
         }
     } else {
         countCache(&DrawProfile::uncacheable);
+        PerformanceTrace::Count("DrawResources", "uncacheable");
     }
     timer.phase(PhaseLookup);
     if (resolved.resources == nullptr) {
+        PerformanceTrace::Count("DrawResources", "built");
         resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
         resolved.use.resources = resolved.resources;
         resolved.built = &resolved.resources->Timing();
@@ -3308,6 +3318,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     const auto waitedBefore = profile ? Recorder::ThreadWaitedMs() : 0.0;
     double ownWaitedMs = 0;
     const auto miss = [&](DrawRecipeMiss reason) {
+        PerformanceTrace::Count("DrawRecipe", DrawRecipeMissName(reason));
         result.miss = reason;
         if (profile) {
             auto& stats = Profile();

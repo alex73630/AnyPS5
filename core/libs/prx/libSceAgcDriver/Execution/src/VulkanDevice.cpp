@@ -4650,6 +4650,7 @@ void VulkanDevice::NoteRecipe(RecipeEvent event, RecipeKind kind) {
 }
 
 void VulkanDevice::NoteDrawRecipeMiss(DrawRecipePrecheck miss) {
+    PerformanceTrace::Count("DrawRecipePrecheck", miss == DrawRecipePrecheck::NoRecipe ? "no recipe" : "device");
     auto& counters = Recipes().kinds[static_cast<std::size_t>(RecipeKind::Draw)];
     counters.precheckMisses[miss == DrawRecipePrecheck::NoRecipe ? MissNoRecipe : MissDevice].fetch_add(1, std::memory_order_relaxed);
 }
@@ -4661,6 +4662,7 @@ RecipeOutcome VulkanDevice::DrawFromRecipe(const Graphics::State& graphics, cons
     // R10: the recipe names the device it was built on (the driver may have replaced the device
     // between the hit and the lock).
     if (recipe->device != state->device) {
+        PerformanceTrace::Count("DrawRecipePrecheck", "device");
         counters.rebuildDevice.fetch_add(1, std::memory_order_relaxed);
         return RecipeOutcome::Rebuild;
     }
@@ -4678,6 +4680,7 @@ RecipeOutcome VulkanDevice::DrawFromRecipe(const Graphics::State& graphics, cons
         return RecipeOutcome::Rebuild;
     }
     counters.proofPaths[static_cast<std::size_t>(outcome.proof.path)].fetch_add(1, std::memory_order_relaxed);
+    PerformanceTrace::Count("DrawRecipe", "hit");
     counters.hits.fetch_add(1, std::memory_order_relaxed);
     if (profile) {
         counters.proofNs.fetch_add(static_cast<std::uint64_t>(outcome.proofUs * 1000.0), std::memory_order_relaxed);

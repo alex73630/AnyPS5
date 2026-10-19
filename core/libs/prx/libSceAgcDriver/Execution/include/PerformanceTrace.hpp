@@ -169,6 +169,16 @@ public:
         std::uint64_t count;
     };
 
+    struct Counter {
+        const char* scope;
+        const char* reason;
+        Clock::time_point at;
+        std::uint64_t count;
+        std::uint64_t present;
+        Clock::duration length;
+        bool timed;
+    };
+
     struct Snapshot {
         std::string name;
         std::span<const Slice> slices;
@@ -177,15 +187,31 @@ public:
         std::uint64_t eventsLost = 0;
         std::optional<Clock::time_point> eventsFullAt;
         bool totalsFull = false;
+        std::vector<Counter> counters;
+        std::uint64_t counterCallsLost = 0;
+        std::optional<Clock::time_point> countersFullAt;
+        std::uint64_t osTid = 0;
     };
 
     inline static const std::atomic<bool> AlwaysBuffering{true};
 
-    TraceThread(std::string name, const std::atomic<std::uint64_t>& presents, std::size_t capacity = DefaultCapacity, const std::atomic<bool>& buffering = AlwaysBuffering)
-        : name(std::move(name)), presents(presents), buffering(buffering), slices(std::make_unique<Slice[]>(capacity)), capacity(capacity) {}
+    TraceThread(std::string name, const std::atomic<std::uint64_t>& presents, std::size_t capacity = DefaultCapacity, const std::atomic<bool>& buffering = AlwaysBuffering, std::uint64_t osTid = 0)
+        : name(std::move(name)), osTid(osTid), presents(presents), buffering(buffering), slices(std::make_unique<Slice[]>(capacity)), capacity(capacity), counterCapacity(std::min(capacity, std::size_t{16384})), counters(std::make_unique<CounterRecord[]>(counterCapacity)) {}
 
     TraceThread(const TraceThread&) = delete;
     TraceThread& operator=(const TraceThread&) = delete;
+
+    bool Buffering() const {
+        return buffering.load(std::memory_order_relaxed);
+    }
+
+    void Count(const char* scope, const char* reason) {
+        record(scope, reason, {}, false);
+    }
+
+    void Measure(const char* scope, const char* stage, Clock::time_point begin, Clock::time_point end) {
+        record(scope, stage, end - begin, true);
+    }
 
     void Add(const char* scope, const char* stage, Clock::time_point begin, Clock::time_point end) {
         const auto length = end - begin;
@@ -203,7 +229,7 @@ public:
         else append({scope, stage, begin, length, TraceBatchTag});
     }
 
-    Snapshot Collect() const {
+    Snapshot Collect(bool includeCounters = true) const {
         Snapshot snapshot{name, {slices.get(), used.load(std::memory_order_acquire)}, {}, false};
         for (const auto& entry : entries) {
             const auto* scope = entry.scope.load(std::memory_order_acquire);
@@ -213,11 +239,70 @@ public:
         snapshot.eventsLost = lost.load(std::memory_order_acquire);
         if (snapshot.eventsLost != 0) snapshot.eventsFullAt = Clock::time_point(Clock::duration(firstLost.load(std::memory_order_relaxed)));
         snapshot.totalsFull = totalsFull.load(std::memory_order_relaxed);
-        snapshot.dropped = snapshot.eventsLost != 0 || snapshot.totalsFull;
+        const auto count = includeCounters ? countersUsed.load(std::memory_order_acquire) : 0;
+        snapshot.counters.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& record = counters[index];
+            snapshot.counters.push_back({record.scope, record.reason, record.at, record.count.load(std::memory_order_relaxed), record.present, Clock::duration(record.length.load(std::memory_order_relaxed)), record.timed});
+        }
+        snapshot.counterCallsLost = includeCounters ? counterCallsLost.load(std::memory_order_acquire) : 0;
+        if (snapshot.counterCallsLost != 0) snapshot.countersFullAt = Clock::time_point(Clock::duration(firstCounterLost.load(std::memory_order_relaxed)));
+        snapshot.osTid = osTid;
+        snapshot.dropped = snapshot.eventsLost != 0 || snapshot.totalsFull || snapshot.counterCallsLost != 0;
         return snapshot;
     }
 
 private:
+    void record(const char* scope, const char* reason, Clock::duration length, bool timed) {
+        if (!buffering.load(std::memory_order_relaxed)) return;
+        const auto present = presents.load(std::memory_order_relaxed);
+        const auto hash = (reinterpret_cast<std::uintptr_t>(scope) ^ (reinterpret_cast<std::uintptr_t>(reason) >> 3)) % counterKeys.size();
+        for (std::size_t probe = 0; probe < counterKeys.size(); ++probe) {
+            auto& key = counterKeys[(hash + probe) % counterKeys.size()];
+            if (key.scope != nullptr && (key.scope != scope || key.reason != reason || key.timed != timed)) continue;
+            if (key.scope != nullptr && key.present == present) {
+                auto& record = counters[key.index];
+                record.length.store(record.length.load(std::memory_order_relaxed) + length.count(), std::memory_order_relaxed);
+                record.count.store(record.count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+                return;
+            }
+            const auto index = countersUsed.load(std::memory_order_relaxed);
+            if (index == counterCapacity) break;
+            auto& record = counters[index];
+            record.scope = scope;
+            record.reason = reason;
+            record.at = Clock::now();
+            record.present = present;
+            record.timed = timed;
+            record.length.store(length.count(), std::memory_order_relaxed);
+            record.count.store(1, std::memory_order_relaxed);
+            key = {scope, reason, present, index, timed};
+            countersUsed.store(index + 1, std::memory_order_release);
+            return;
+        }
+        const auto lost = counterCallsLost.load(std::memory_order_relaxed);
+        if (lost == 0) firstCounterLost.store(Clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+        counterCallsLost.store(lost + 1, std::memory_order_release);
+    }
+
+    struct CounterRecord {
+        const char* scope = nullptr;
+        const char* reason = nullptr;
+        Clock::time_point at{};
+        std::uint64_t present = 0;
+        bool timed = false;
+        std::atomic<Clock::rep> length{0};
+        std::atomic<std::uint64_t> count{0};
+    };
+
+    struct CounterKey {
+        const char* scope = nullptr;
+        const char* reason = nullptr;
+        std::uint64_t present = 0;
+        std::size_t index = 0;
+        bool timed = false;
+    };
+
     struct Entry {
         std::atomic<const char*> scope{nullptr};
         std::atomic<const char*> stage{nullptr};
@@ -257,6 +342,7 @@ private:
     }
 
     const std::string name;
+    const std::uint64_t osTid;
     const std::atomic<std::uint64_t>& presents;
     const std::atomic<bool>& buffering;
     const std::unique_ptr<Slice[]> slices;
@@ -270,6 +356,12 @@ private:
     std::uint64_t sampledPresent = 0;
     Clock::time_point sampleBegin{};
     Clock::duration folded{};
+    const std::size_t counterCapacity;
+    std::unique_ptr<CounterRecord[]> counters;
+    std::array<CounterKey, 256> counterKeys{};
+    std::atomic<std::size_t> countersUsed{0};
+    std::atomic<std::uint64_t> counterCallsLost{0};
+    std::atomic<Clock::rep> firstCounterLost{0};
 };
 
 struct TraceHost {
@@ -491,7 +583,7 @@ public:
             event("thread_name", "M", origin, tid);
             output += ",\"args\":{\"name\":";
             AppendString(output, thread.name);
-            output += "}}";
+            output += ",\"os_tid\":" + std::to_string(thread.osTid) + "}}";
             std::vector<TraceThread::Slice> slices(thread.slices.begin(), thread.slices.end());
             std::stable_sort(slices.begin(), slices.end(), [](const auto& a, const auto& b) { return a.begin != b.begin ? a.begin < b.begin : a.length > b.length; });
             const auto folded = thread.name + " folded";
@@ -511,12 +603,24 @@ public:
                 event("trace buffer full", "i", *thread.eventsFullAt, tid);
                 output += ",\"s\":\"t\",\"args\":{\"events_lost\":" + std::to_string(thread.eventsLost) + "}}";
             }
+            for (const auto& counter : thread.counters) {
+                event(Name(counter.scope, counter.reason), "i", counter.at, tid);
+                output += ",\"s\":\"t\",\"cat\":";
+                AppendString(output, counter.timed ? "phase_time" : "cache");
+                output += ",\"args\":{\"calls\":" + std::to_string(counter.count) + ",\"present\":" + std::to_string(counter.present);
+                if (counter.timed) output += ",\"ns\":" + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(counter.length).count());
+                output += "}}";
+            }
+            if (thread.counterCallsLost != 0) {
+                event("cache counters full", "i", thread.countersFullAt.value_or(origin), tid);
+                output += ",\"s\":\"t\",\"args\":{\"calls_lost\":" + std::to_string(thread.counterCallsLost) + "}}";
+            }
         }
         for (std::size_t index = 0; index + 1 < presents.size(); ++index) {
             event("present", "i", presents[index], presenter + 1);
             output += ",\"s\":\"g\",\"args\":{\"present\":" + std::to_string(firstPresent + index) + "}}";
         }
-        output += "\n]}\n";
+        output += "\n],\"steady_clock_origin_ns\":" + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(origin.time_since_epoch()).count()) + "}\n";
         return output;
     }
 
@@ -596,14 +700,16 @@ public:
             std::uint64_t eventsLost = 0;
             std::optional<Clock::time_point> eventsFullAt;
             bool totalsFull = false;
+            std::uint64_t counterCallsLost = 0;
         };
         std::vector<DroppedThread> droppedList;
         for (const auto& thread : threads) {
             dropped = dropped || thread.dropped;
-            if (thread.eventsLost != 0 || thread.totalsFull) {
+            if (thread.eventsLost != 0 || thread.totalsFull || thread.counterCallsLost != 0) {
                 auto entry = std::find_if(droppedList.begin(), droppedList.end(), [&](const DroppedThread& candidate) { return candidate.name == thread.name; });
                 if (entry == droppedList.end()) entry = droppedList.insert(droppedList.end(), DroppedThread{thread.name});
                 entry->eventsLost += thread.eventsLost;
+                entry->counterCallsLost += thread.counterCallsLost;
                 if (thread.eventsLost != 0 && thread.eventsFullAt && (!entry->eventsFullAt || *thread.eventsFullAt < *entry->eventsFullAt)) entry->eventsFullAt = thread.eventsFullAt;
                 entry->totalsFull = entry->totalsFull || thread.totalsFull;
             }
@@ -635,6 +741,7 @@ public:
                 if (!droppedThreads.empty()) droppedThreads += ',';
                 AppendString(droppedThreads, entry.name);
                 droppedThreads += ":{";
+                if (entry.counterCallsLost != 0) droppedThreads += "\"counter_calls_lost\":" + std::to_string(entry.counterCallsLost) + ",";
                 if (entry.eventsLost != 0) {
                     if (entry.eventsFullAt && !presents.empty() && *entry.eventsFullAt >= presents.front() && *entry.eventsFullAt <= presents.back()) droppedThreads += "\"events_full_after_s\":" + number(std::chrono::duration<double>(*entry.eventsFullAt - presents.front()).count()) + ",";
                     droppedThreads += "\"events_lost\":" + std::to_string(entry.eventsLost) + ",";
@@ -755,6 +862,15 @@ public:
 
     static TraceThread* Thread() {
         return AgcDriverTraceThread_nid_postfix();
+    }
+
+    static void Count(const char* scope, const char* reason) {
+        if (auto* thread = Recording() ? Thread() : nullptr) thread->Count(scope, reason);
+    }
+
+    static TraceThread* DetailedThread() {
+        auto* thread = Recording() ? Thread() : nullptr;
+        return thread != nullptr && thread->Buffering() ? thread : nullptr;
     }
 
     static void StopOutput();

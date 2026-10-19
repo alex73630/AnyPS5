@@ -147,13 +147,59 @@ void EventsShape() {
     const std::string expected =
         "{\"traceEvents\":[\n"
         "{\"name\":\"process_name\",\"ph\":\"M\",\"ts\":0.000,\"pid\":7,\"tid\":0,\"args\":{\"name\":\"AnyPS5\"}},\n"
-        "{\"name\":\"thread_name\",\"ph\":\"M\",\"ts\":0.000,\"pid\":7,\"tid\":1,\"args\":{\"name\":\"queue worker 0x0\"}},\n"
+        "{\"name\":\"thread_name\",\"ph\":\"M\",\"ts\":0.000,\"pid\":7,\"tid\":1,\"args\":{\"name\":\"queue worker 0x0\",\"os_tid\":0}},\n"
         "{\"name\":\"queue worker 0x0 folded\",\"ph\":\"C\",\"ts\":0.000,\"pid\":7,\"tid\":1,\"args\":{\"ms\":2.000}},\n"
         "{\"name\":\"Driver.Packet\",\"ph\":\"X\",\"ts\":10.000,\"pid\":7,\"tid\":1,\"dur\":30.000},\n"
         "{\"name\":\"Driver.Packet.draw\",\"ph\":\"X\",\"ts\":12.000,\"pid\":7,\"tid\":1,\"dur\":25.000},\n"
         "{\"name\":\"present\",\"ph\":\"i\",\"ts\":0.000,\"pid\":7,\"tid\":1,\"s\":\"g\",\"args\":{\"present\":5}}\n"
-        "]}\n";
+        "],\"steady_clock_origin_ns\":" + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(origin.time_since_epoch()).count()) + "}\n";
     Check(json == expected, "trace events changed shape");
+}
+
+void FrameCounters() {
+    std::atomic<std::uint64_t> presents{1};
+    std::atomic<bool> buffering{false};
+    TraceThread thread("worker", presents, 3, buffering);
+    thread.Count("Resources", "miss");
+    Check(thread.Collect().counters.empty(), "a disabled window recorded a cache call");
+    buffering.store(true);
+    thread.Count("Resources", "miss");
+    thread.Count("Resources", "miss");
+    thread.Count("Resources", "hit");
+    presents.store(2);
+    thread.Count("Resources", "miss");
+    thread.Count("Resources", "miss");
+    thread.Count("Resources", "miss");
+    auto snapshot = thread.Collect();
+    Check(snapshot.counters.size() == 3 && snapshot.counters[0].count == 2 && snapshot.counters[1].count == 1 && snapshot.counters[2].count == 3, "cache outcomes did not coalesce separately for each present");
+    Check(!snapshot.dropped && snapshot.totals.empty() && snapshot.slices.empty(), "cache calls changed time accounting");
+    presents.store(3);
+    thread.Count("Resources", "hit");
+    snapshot = thread.Collect();
+    Check(snapshot.dropped && snapshot.counterCallsLost == 1 && snapshot.eventsLost == 0 && snapshot.countersFullAt >= snapshot.counters.back().at, "lost cache calls did not report their independent capacity limit");
+    buffering.store(false);
+    thread.Count("Resources", "hit");
+    Check(thread.Collect().counterCallsLost == 1 && thread.Collect(false).counters.empty() && !thread.Collect(false).dropped && !thread.Collect(false).countersFullAt, "closed-window counters changed or summary collection copied them");
+    const auto origin = snapshot.counters.front().at;
+    const std::array threads{snapshot};
+    const auto json = TraceFormat::Events(7, origin, threads, 0, {}, 0);
+    Check(json.find("\"cat\":\"cache\",\"args\":{\"calls\":3,\"present\":2}") != std::string::npos && json.find("\"calls_lost\":1") != std::string::npos, "cache counts or capacity loss were missing from the trace");
+}
+
+void MeasuredPhases() {
+    std::atomic<std::uint64_t> presents{17};
+    TraceThread thread("worker", presents, 8, TraceThread::AlwaysBuffering, 321);
+    const auto begin = Clock::now();
+    thread.Measure("Phase", "short", begin, begin + microseconds(2));
+    thread.Measure("Phase", "short", begin, begin + microseconds(3));
+    thread.Count("Phase", "short");
+    const auto snapshot = thread.Collect();
+    Check(snapshot.counters.size() == 2 && snapshot.counters[0].count == 2 && snapshot.counters[0].length == microseconds(5), "short phase durations were lost or mixed with counts");
+    Check(snapshot.counters[0].present == 17 && snapshot.counters[0].timed && !snapshot.counters[1].timed, "measurement metadata is wrong");
+    Check(snapshot.totals.empty() && snapshot.slices.empty(), "phase measurements changed ordinary trace summaries");
+    const std::array threads{snapshot};
+    const auto json = TraceFormat::Events(7, begin, threads, 0, {}, 0);
+    Check(json.find("\"os_tid\":321") != std::string::npos && json.find("\"ns\":5000") != std::string::npos, "thread identity or phase duration was not exported");
 }
 
 void BatchIds() {
@@ -577,6 +623,8 @@ int main() {
         FoldShortSlices();
         EscapeStrings();
         EventsShape();
+        FrameCounters();
+        MeasuredPhases();
         BatchIds();
         SummaryFields();
         GpuClock();
