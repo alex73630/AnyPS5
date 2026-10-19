@@ -231,6 +231,7 @@ void movedSnapshotTests(const Context& context) {
     const auto address = reinterpret_cast<std::uint64_t>(block);
     auto importing = context;
     importing.hostImportAlignment = piece;
+    importing.limits.minStorageBufferOffsetAlignment = 16;
     const auto change = [&](std::size_t offset, bool add) {
         auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
         if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, block + offset, piece, true, true, true);
@@ -269,6 +270,27 @@ void movedSnapshotTests(const Context& context) {
             try { memory.MovedSnapshotsLive(within); } catch (const std::exception&) { refusedSuspended = true; }
             Require(refusedSuspended, "a moved snapshot was checked without its address space");
             Require(memory.ResumeSpace(), "the unchanged address space could not be resumed");
+            using BaseView = GuestBufferMemory::BaseView;
+            VkDescriptorBufferInfo view{};
+            for (const auto candidate : {address + 512, address + 516, address + 2 * piece + 128}) {
+                GuestBufferMemory fresh(importing);
+                fresh.AcquireRegistered();
+                fresh.AddReadable(candidate, 32);
+                fresh.Upload(true);
+                std::uint32_t adjustment = 0;
+                const auto expected = fresh.Descriptor(candidate, 32, adjustment);
+                Require(memory.BaseDescriptor(candidate, 32, adjustment, view) == BaseView::Bound && view.buffer == expected.buffer && view.offset == expected.offset && view.range == expected.range, "a base view differs from a fresh descriptor");
+                fresh.WriteBack();
+            }
+            const auto retained = view;
+            Require(memory.BaseDescriptor(address + 516, 32, 0, view) == BaseView::Adjustment, "a base view accepted a different storage adjustment");
+            Require(memory.BaseDescriptor(address + piece - 8, 32, 0, view) == BaseView::Outside && memory.BaseDescriptor(address + piece + 512, 32, 0, view) == BaseView::Outside, "a base view escaped its registered region");
+            Require(memory.BaseDescriptor(0, 32, 0, view) == BaseView::Outside && memory.BaseDescriptor(address, 0, 0, view) == BaseView::Outside && memory.BaseDescriptor(std::numeric_limits<std::uint64_t>::max() - 1, 4, 0, view) == BaseView::Outside, "an invalid base view was accepted");
+            Require(view.buffer == retained.buffer && view.offset == retained.offset && view.range == retained.range, "a refused base view changed its output");
+            memory.SuspendSpace();
+            bool refusedView = false;
+            try { memory.BaseDescriptor(address, 32, 0, view); } catch (const std::exception&) { refusedView = true; }
+            Require(refusedView && memory.ResumeSpace(), "a base view did not require a resumed space");
             Require(memory.MovedSnapshotsLive(within), "a live capture moved inside its import was refused");
             Require(memory.MatchSnapshots(reordered) == SnapshotMatch::Moved && memory.MovedSnapshotsLive(reordered), "moving a live capture across a copied capture into another import was refused");
             block[512] ^= std::byte{0xff};
@@ -3737,10 +3759,53 @@ void addressMovedBufferTests(const Context& context) {
         Require(resources.UsesAddressTable(), "a draw build with a BDA table stage does not use the BDA table");
         const auto unchanged = resources.MovedReadOnlyBuffers(built, recorder);
         Require(unchanged.has_value() && unchanged->empty(), "an address-based draw build found a buffer moved in the stages it was built from");
-        Require(!resources.MovedReadOnlyBuffers(movedStages, recorder).has_value(), "an address-based draw build would serve a draw whose read-only buffer moved, which it cannot bind per draw");
+        ShaderResources::MoveProof proof;
+        Require(!resources.MovedReadOnlyBuffers(movedStages, recorder, &proof).has_value() && proof.refusal == ShaderResources::MoveRefusal::AddressState, "a non-reusable address build accepted a moved buffer");
         Require(!resources.MovedReadOnlyBuffers(rewrittenStages, recorder).has_value(), "an address-based draw build would serve a draw with other data words, which it cannot bind per draw");
         resources.WriteBack();
     }
+    recorder.Sync();
+}
+
+void reusableAddressMovedBufferTests(const Context& context) {
+    if (!AddressSpaceCounters().enabled) return;
+    WindowedRange range(context, WindowedRange::piece, 2);
+    range.importing.limits.minStorageBufferOffsetAlignment = 16;
+    alignas(64) static std::array<std::uint32_t, 16> outside{};
+    const auto vsharp = [](std::uint64_t address) {
+        return std::vector<std::uint32_t>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32) & 0xffffu, 64u, 0x31000000u};
+    };
+    ShaderRecompiler::RecompileResult vertex;
+    auto buffer = binding(Role::GuestBuffers, 6);
+    buffer.guestDescriptor = vsharp(range.First());
+    buffer.bufferWritten = {false};
+    vertex.bindings = {buffer};
+    ShaderRecompiler::RecompileResult fragment;
+    fragment.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+    fragment.bindings = {binding(Role::BdaPagetable, 4), binding(Role::FaultBuffer, 5)};
+    const std::array<CompiledShader, 2> stages{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0}}};
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    Recorder recorder(range.importing);
+    ShaderResources resources(range.importing, stages, ColorTarget{}, 0, 0, 0, {});
+    Require(resources.Reusable(), "the moved view fixture has no reusable base");
+    resources.EndUse();
+    Require(resources.Revalidate(stages, nullptr, {}), "the moved view fixture could not resume its base");
+    ShaderResources::MoveProof proof;
+    vertex.bindings[0].guestDescriptor = vsharp(range.First() + 512);
+    const auto moved = resources.MovedReadOnlyBuffers(stages, recorder, &proof);
+    GuestBufferMemory fresh(range.importing);
+    fresh.AcquireRegistered();
+    fresh.AddReadable(range.First() + 512, 64);
+    fresh.Upload(true);
+    std::uint32_t adjustment = 0;
+    const auto expected = fresh.Descriptor(range.First() + 512, 64, adjustment);
+    Require(moved.has_value() && moved->size() == 1 && proof.refusal == ShaderResources::MoveRefusal::None && moved->front().view.buffer == expected.buffer && moved->front().view.offset == expected.offset && moved->front().view.range == expected.range, "a moved binding differs from a fresh base view");
+    fresh.WriteBack();
+    vertex.bindings[0].guestDescriptor = vsharp(range.First() + 516);
+    Require(!resources.MovedReadOnlyBuffers(stages, recorder, &proof).has_value() && proof.refusal == ShaderResources::MoveRefusal::AddressAdjustment, "a moved binding did not report its adjustment mismatch");
+    vertex.bindings[0].guestDescriptor = vsharp(reinterpret_cast<std::uint64_t>(outside.data()));
+    Require(!resources.MovedReadOnlyBuffers(stages, recorder, &proof).has_value() && proof.refusal == ShaderResources::MoveRefusal::AddressOutside, "a moved binding did not report its range outside the base");
+    resources.EndUse();
     recorder.Sync();
 }
 
@@ -4069,6 +4134,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     spaceReuseTests(context);
     movedSnapshotTests(context);
     addressMovedBufferTests(context);
+    reusableAddressMovedBufferTests(context);
     addressRejectedTableElementTests(context);
     addressFailedSubmissionTests(context, access);
     importSpanTests(context);

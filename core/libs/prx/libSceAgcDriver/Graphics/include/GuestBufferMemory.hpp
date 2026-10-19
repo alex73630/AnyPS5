@@ -338,6 +338,8 @@ public:
     void Upload(bool addressable);
     void UploadPrepare(bool addressable);
     void UploadFinish(bool addressable);
+    enum class BaseView : std::uint8_t { Bound, Outside, Adjustment };
+    BaseView BaseDescriptor(std::uint64_t address, std::size_t bytes, std::uint32_t adjustment, VkDescriptorBufferInfo& view) const;
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes, std::uint32_t& adjustment) const;
     static std::uint64_t ViewBytes(std::uint64_t bytes, std::uint32_t adjustment);
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
@@ -503,6 +505,7 @@ private:
     // range inside a base region of the space adds nothing: the region serves it, as today's merge
     // of the two did.
     void addDescriptorRegion(std::uint64_t address, std::size_t bytes, bool atomic, bool swept, bool readOnly);
+    const char* describe(const Region& region, std::uint64_t address, std::size_t bytes, std::uint32_t& adjustment, VkDescriptorBufferInfo& view) const;
     static bool servesView(const Region& region, std::uint64_t view);
     static bool sparseHeapCandidate(const Region& region);
     bool bindSparseMirror(Region& region, const GuestAllocations::Lease& lease);

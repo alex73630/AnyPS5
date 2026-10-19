@@ -662,6 +662,7 @@ struct DrawProfile {
     // Draw packets that drew nothing, by DrawSkip, and their time.
     std::array<std::uint64_t, static_cast<std::size_t>(DrawSkip::Count)> skips{};
     std::array<double, static_cast<std::size_t>(DrawSkip::Count)> skipUs{};
+    std::uint64_t addressBufferViews = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(ShaderResources::MoveRefusal::Count)> addressMoveRefusals{};
     AddressReuseStats reuseSeen;
     LeaseStats leaseSeen;
@@ -792,6 +793,10 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     if (reuse.movedSnapshotCandidates != reuseSeen.movedSnapshotCandidates || reuseCount(AddressReuse::Snapshots) != 0) {
         const auto missed = [&](SnapshotReuseMiss kind) { return static_cast<unsigned long long>(reuse.snapshotMisses[static_cast<std::size_t>(kind)] - reuseSeen.snapshotMisses[static_cast<std::size_t>(kind)]); };
         std::fprintf(stderr, "[rescache] moved snapshots: %llu candidates, %llu proofs passed, %llu draws reused, %llu refused by buffer-move check; snapshot refusals: copied captures %llu, outside live space %llu, image or sampler tables %llu\n", static_cast<unsigned long long>(reuse.movedSnapshotCandidates - reuseSeen.movedSnapshotCandidates), static_cast<unsigned long long>(reuse.movedSnapshotProofs - reuseSeen.movedSnapshotProofs), static_cast<unsigned long long>(reuse.movedSnapshotReused - reuseSeen.movedSnapshotReused), static_cast<unsigned long long>(reuse.movedSnapshotBuffersRefused - reuseSeen.movedSnapshotBuffersRefused), missed(SnapshotReuseMiss::MovedCopied), missed(SnapshotReuseMiss::MovedOutside), missed(SnapshotReuseMiss::MovedTables));
+    }
+    if (profile.addressBufferViews != 0) {
+        std::fprintf(stderr, "[rescache] moved address buffer views: %llu selected\n", static_cast<unsigned long long>(profile.addressBufferViews));
+        profile.addressBufferViews = 0;
     }
     if (std::any_of(profile.addressMoveRefusals.begin(), profile.addressMoveRefusals.end(), [](auto count) { return count != 0; })) {
         std::fprintf(stderr, "[rescache] address buffer move refusals:");
@@ -1730,10 +1735,15 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             if (moved.has_value()) {
                 resolved.resources = std::move(cached);
                 resolved.moved = std::move(*moved);
-                if (trimKey) CheckBufferAliases(context, shaders, state.color, draw.indexAddress, indexBytes);
+                if (trimKey || !resolved.moved.empty()) CheckBufferAliases(context, shaders, state.color, draw.indexAddress, indexBytes);
                 outcome.kind = KindTemplateHit;
                 countCache(&DrawProfile::cacheHits);
                 if (addressBased) CountAddressReuse(AddressReuse::Reused);
+                if (addressBased && timer.profile) {
+                    auto& stats = Profile();
+                    std::lock_guard lock(stats.mutex);
+                    stats.addressBufferViews += std::count_if(resolved.moved.begin(), resolved.moved.end(), [](const auto& entry) { return entry.view.buffer != VK_NULL_HANDLE; });
+                }
                 if (proof.movedSnapshots) CountMovedSnapshotUse(true);
             } else if (valid) {
                 if (addressBased && timer.profile) {

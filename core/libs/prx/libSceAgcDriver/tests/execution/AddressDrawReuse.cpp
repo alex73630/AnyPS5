@@ -615,7 +615,7 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     const auto beforeBuffer = AddressReuseCounters();
     run(scene.guest, One);
     const auto afterBuffer = AddressReuseCounters();
-    Require(Builds() == built + 1 && Counted(afterBuffer, AddressReuse::Moved) == Counted(beforeBuffer, AddressReuse::Moved) + 1, "a moved guest buffer bypassed the address draw binding restriction");
+    Require(Builds() == built && Counted(afterBuffer, AddressReuse::Reused) == Counted(beforeBuffer, AddressReuse::Reused) + 1, "a moved guest buffer inside the base did not reuse its address build");
     std::memcpy(scene.guest.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
     std::memcpy(scene.spare.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
     const auto batchBuilds = Builds();
@@ -628,6 +628,78 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     std::memcpy(&spareStored, scene.spare.Data() + StoreOffset, sizeof(spareStored));
     Require(scene.Color() == 255 && scene.Stored() == Bits(One) && spareStored == Bits(Zero), "two queued storage roots shared their draw data");
     Require(Builds() == batchBuilds + 1 && Counted(afterBatch, AddressReuse::InUse) == Counted(beforeBatch, AddressReuse::InUse) + 1, "queued storage roots reused an in-flight BDA fault buffer");
+}
+
+void MovedAddressBuffer(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    Scene scene(device, 0, 16, true);
+    Pages movedVertices{BlockBytes};
+    std::memcpy(movedVertices.Data(), Triangle.data(), sizeof(Triangle));
+    movedVertices.Register(0, BlockBytes, false);
+    auto vertex = std::find_if(scene.vertexResult.bindings.begin(), scene.vertexResult.bindings.end(), [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers; });
+    Require(vertex != scene.vertexResult.bindings.end() && vertex->guestDescriptor.size() == 4, "the moved view test requires one vertex buffer");
+    const auto point = [&](std::uint64_t address) {
+        vertex->guestDescriptor[0] = static_cast<std::uint32_t>(address);
+        vertex->guestDescriptor[1] = (vertex->guestDescriptor[1] & 0xffff0000u) | static_cast<std::uint32_t>((address >> 32u) & 0xffffu);
+    };
+    const auto run = [&](std::uint64_t address, bool drawn = true) {
+        point(address);
+        scene.Clear();
+        scene.Draw();
+        scene.Wait();
+        Require(scene.Stored() == (drawn ? Bits(One) : Sentinel), "a moved vertex view read the wrong geometry");
+        if (drawn) Require(scene.Color() == 255, "a moved vertex view did not cover the target");
+    };
+    run(scene.vertices.Address());
+    run(scene.vertices.Address());
+    auto built = Builds();
+    auto before = AddressReuseCounters();
+    run(movedVertices.Address());
+    auto after = AddressReuseCounters();
+    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1, "moving a vertex view to another base import rebuilt resources");
+    std::memset(scene.vertices.Data(), 0, sizeof(Triangle));
+    run(movedVertices.Address());
+    run(scene.vertices.Address(), false);
+    Require(Builds() == built, "returning to the original vertex view rebuilt resources");
+    std::memcpy(scene.vertices.Data(), Triangle.data(), sizeof(Triangle));
+    std::memcpy(scene.vertices.Data() + PageBytes, Triangle.data(), sizeof(Triangle));
+    run(scene.vertices.Address(PageBytes));
+    Require(Builds() == built, "moving a vertex view inside its base import rebuilt resources");
+    std::memcpy(scene.vertices.Data() + PageBytes + 4, Triangle.data(), sizeof(Triangle));
+    const auto alignment = AgcDriver::VulkanDeviceTestAccess::ContextOf(device).limits.minStorageBufferOffsetAlignment;
+    before = AddressReuseCounters();
+    run(scene.vertices.Address(PageBytes + 4));
+    after = AddressReuseCounters();
+    const auto outcome = alignment > 4 ? AddressReuse::Moved : AddressReuse::Reused;
+    Require(Builds() == built + (alignment > 4 ? 1 : 0) && Counted(after, outcome) == Counted(before, outcome) + 1, "a moved vertex view did not enforce the storage adjustment");
+    built = Builds();
+    std::memcpy(movedVertices.Data() + 4, Triangle.data(), sizeof(Triangle));
+    run(movedVertices.Address(4));
+    Require(Builds() == built, "a moved vertex view with the same nonzero adjustment rebuilt resources");
+    run(scene.vertices.Address());
+    run(scene.vertices.Address());
+    built = Builds();
+    before = AddressReuseCounters();
+    const std::array<std::uint32_t, 4> pattern{};
+    point(movedVertices.Address());
+    scene.Clear();
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        Require(device.FillBuffer(movedVertices.Address(), sizeof(Triangle), pattern), "the moved vertex fill was not recorded");
+        scene.Draw();
+    }
+    scene.Wait();
+    after = AddressReuseCounters();
+    Require(scene.Stored() == Sentinel && Builds() == built + 1 && Counted(after, AddressReuse::Moved) == Counted(before, AddressReuse::Moved) + 1, "a pending write to moved vertices was not reflected by the fallback draw");
+    Pages outside{BlockBytes};
+    std::memcpy(outside.Data(), Triangle.data(), sizeof(Triangle));
+    run(scene.vertices.Address());
+    run(scene.vertices.Address());
+    built = Builds();
+    before = AddressReuseCounters();
+    run(outside.Address());
+    after = AddressReuseCounters();
+    Require(Builds() == built + 1 && Counted(after, AddressReuse::Moved) == Counted(before, AddressReuse::Moved) + 1, "a moved vertex view outside the base did not rebuild resources");
 }
 
 void MovedImageTableSnapshot(AgcDriver::VulkanDevice& device) {
@@ -956,6 +1028,7 @@ int main(int argc, char** argv) {
             }
             MovedLiveSnapshot(*device);
             MovedLiveShaderData(*device);
+            MovedAddressBuffer(*device);
             MovedImageTableSnapshot(*device);
             OversizedVertexBuffer(*device);
             ThrowingProof(*device);
