@@ -1019,7 +1019,7 @@ void UncachedQueuedDraws(AgcDriver::VulkanDevice& device) {
     scene.Draw();
     scene.Wait();
     Require(scene.Color() == 255 && scene.Stored() == Bits(One), "uncached queued draws changed their output");
-    if (std::getenv("APS5_LOOP_GUARD") != nullptr) Require(AgcDriver::Graphics::AddressReuseCounters().inFlightReused == before.inFlightReused, "loop-guarded draws reused an in-flight build");
+    Require(AgcDriver::Graphics::AddressReuseCounters().inFlightReused == before.inFlightReused, "uncached queued draws counted an in-flight reuse");
 }
 
 void Remap(Scene& scene) {
