@@ -5635,6 +5635,7 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                 if (written || empty || item.written) return refuse(MoveRefusal::Written);
                 if (size > context.limits.maxStorageBufferRange) return refuse(MoveRefusal::Limit);
+                if (address < item.adjustment) return refuse(MoveRefusal::Inaccessible);
                 const auto begin = address - item.adjustment;
                 const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
                 if (!GuestMemory::Accessible(reinterpret_cast<const void*>(begin), bytes)) return refuse(MoveRefusal::Inaccessible);
@@ -5642,15 +5643,21 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 if (recorder.PendingWriteOverlaps(begin, bytes)) return refuse(MoveRefusal::PendingWrites);
                 if (PendingStorageOverlaps(begin, bytes, nullptr)) return refuse(MoveRefusal::StorageWrites);
                 if (AnyShadowedOverlaps(begin, bytes)) return refuse(MoveRefusal::Shadowed);
+                VkDescriptorBufferInfo view{};
+                if (usesBda) {
+                    if (!addressReuse) return refuse(MoveRefusal::AddressState);
+                    VkDescriptorBufferInfo original{};
+                    if (guestMemory.BaseDescriptor(item.address, item.size, item.adjustment, original) != GuestBufferMemory::BaseView::Bound) return refuse(MoveRefusal::AddressOrigin);
+                    const auto bound = guestMemory.BaseDescriptor(address, static_cast<std::size_t>(size), item.adjustment, view);
+                    if (bound == GuestBufferMemory::BaseView::Outside) return refuse(MoveRefusal::AddressOutside);
+                    if (bound == GuestBufferMemory::BaseView::Adjustment) return refuse(MoveRefusal::AddressAdjustment);
+                }
                 if (moved.empty()) moved.reserve(allocations.size());
-                moved.push_back({index, address, static_cast<std::size_t>(size)});
+                moved.push_back({index, address, static_cast<std::size_t>(size), {}, view});
             }
         }
     }
-    if (usesBda && !moved.empty()) {
-        if (!addressReuse) return refuse(MoveRefusal::AddressState);
-        if (std::any_of(moved.begin(), moved.end(), [](const MovedBuffer& entry) { return entry.words.empty(); })) return refuse(MoveRefusal::AddressBuffer);
-    }
+    if (usesBda && !moved.empty() && !addressReuse) return refuse(MoveRefusal::AddressState);
     return moved;
 }
 
@@ -5669,7 +5676,9 @@ const char* ShaderResources::MoveRefusalName(MoveRefusal refusal) {
         case MoveRefusal::PendingWrites: return "recorder writes moved range";
         case MoveRefusal::StorageWrites: return "storage image writes moved range";
         case MoveRefusal::Shadowed: return "moved range shadowed";
-        case MoveRefusal::AddressBuffer: return "BDA guest buffer moved";
+        case MoveRefusal::AddressOrigin: return "original buffer outside BDA base";
+        case MoveRefusal::AddressOutside: return "moved buffer outside BDA base";
+        case MoveRefusal::AddressAdjustment: return "BDA buffer adjustment changed";
         case MoveRefusal::AddressState: return "BDA build not reusable";
         case MoveRefusal::NoRecorder: return "no active recorder";
         case MoveRefusal::Count: break;
@@ -5705,6 +5714,7 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedD
             const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
             if (written || empty || item.written) return refuse(MoveRefusal::Written);
             if (size > context.limits.maxStorageBufferRange) return refuse(MoveRefusal::Limit);
+            if (address < item.adjustment) return refuse(MoveRefusal::Inaccessible);
             const auto begin = address - item.adjustment;
             const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
             if (maxBytes != 0 && proof.bytes + bytes > maxBytes) return refuse(MoveRefusal::Limit);
@@ -5738,7 +5748,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     if (_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) return {};
     if (usesBda) {
         if (!addressReuse || moved.empty()) return {};
-        Require(std::all_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation < allocations.size() && !entry.words.empty() && !allocations[entry.allocation].guest && DataRole(allocations[entry.allocation].role); }), "address draw bindings can replace only shader data words");
+        Require(std::all_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation < allocations.size() && (entry.words.empty() ? allocations[entry.allocation].guest && !allocations[entry.allocation].written && entry.view.buffer != VK_NULL_HANDLE : !allocations[entry.allocation].guest && DataRole(allocations[entry.allocation].role)); }), "address draw bindings require shader data words or live read-only views");
         movedOnly = true;
     }
     thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>>* readsSlot = nullptr;
@@ -5751,6 +5761,9 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     thread_local std::vector<std::size_t>* selectedSlot = nullptr;
     auto& selected = ShaderRecompiler::ThreadOwned(selectedSlot);
     selected.clear();
+    thread_local std::vector<std::pair<std::size_t, VkDescriptorBufferInfo>>* viewsSlot = nullptr;
+    auto& views = ShaderRecompiler::ThreadOwned(viewsSlot);
+    views.clear();
     std::array<std::uint64_t, 3> stamp{};
     bool stamped = false;
     const auto keep = [&](DrawBindings::Snapshot snapshot) {
@@ -5760,6 +5773,10 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     for (std::size_t index = 0; index < allocations.size(); ++index) {
         const auto& item = allocations[index];
         const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
+        if (override != moved.end() && override->view.buffer != VK_NULL_HANDLE) {
+            views.emplace_back(index, override->view);
+            continue;
+        }
         if (override != moved.end() && !override->words.empty()) {
             constexpr std::size_t MovedWordBufferSlots = 8;
             const auto held = std::find_if(movedWordBuffers.begin(), movedWordBuffers.end(), [&](const MovedWordBuffer& entry) { return entry.allocation == index && entry.size == override->size && std::ranges::equal(entry.words, override->words); });
@@ -5833,7 +5850,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         totalSnapshotBytes += bytes;
         CaptureTrace::Log("draw-snapshot batch=%llu address=%llx bytes=%zu", static_cast<unsigned long long>(recorder.Submissions() + 1), static_cast<unsigned long long>(begin), bytes);
     }
-    if (selected.empty()) return {};
+    if (selected.empty() && views.empty()) return {};
     Require(context.descriptorCache != nullptr, "draw snapshots require a descriptor cache");
     std::array<bool, 2> described{};
     thread_local std::array<std::vector<VkDescriptorPoolSize>, 2>* countsSlot = nullptr;
@@ -5883,6 +5900,11 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
             const auto offset = static_cast<std::size_t>(write.pBufferInfo - descriptorBuffers.data());
             write.pBufferInfo = buffers.data() + offset;
             for (std::size_t element = 0; element < binding.allocations.size(); ++element) {
+                const auto view = std::find_if(views.begin(), views.end(), [&](const auto& entry) { return entry.first == binding.allocations[element]; });
+                if (view != views.end()) {
+                    buffers[offset + element] = view->second;
+                    continue;
+                }
                 const auto snapshotIndex = snapshotIndices[binding.allocations[element]];
                 if (snapshotIndex == selected.size()) continue;
                 const auto& snapshot = result->snapshots[snapshotIndex];
