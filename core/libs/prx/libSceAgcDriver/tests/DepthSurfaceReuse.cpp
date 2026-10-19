@@ -419,6 +419,26 @@ void TestRetiredSurfaceRelease(const Context& context) {
     ClearDepthSurfaces(context.device);
 }
 
+void TestRetiredStencilCopy(const Context& context) {
+    ClearDepthSurfaces(context.device);
+    const auto destroyed = [](VkImage image) { return std::find(destroyedImages.begin(), destroyedImages.end(), image) != destroyedImages.end(); };
+    constexpr std::uint64_t depth = 0xac000000;
+    constexpr std::uint64_t stencil = 0xad000000;
+    DepthSurfaceView(context, {depth, stencil, {256, 256}, VK_FORMAT_D32_SFLOAT_S8_UINT, 1.0f, 0});
+    const auto depthImage = lastImage;
+    auto texture = lookup(context, {stencil, FormatR8Unorm, 256, 256});
+    Require(texture != nullptr, "the stencil copy must exist before retiring its depth surface");
+    const auto copyImage = createdImages.back();
+    RetireDepthSurfaces(context.device, depth, DepthSliceBytes({256, 256}, 4u));
+    const auto released = DepthSurfacesReleased();
+    DepthSurfaceView(context, {0xae000000, 0, {256, 256}, VK_FORMAT_D32_SFLOAT, 1.0f, 0});
+    Require(DepthSurfacesReleased() > released && destroyed(depthImage), "a retired surface may be released while its stencil copy is held");
+    Require(!destroyed(copyImage), "the sampled stencil copy must retain its image after surface release");
+    texture.reset();
+    Require(destroyed(copyImage), "the stencil copy must release its image with its last sampled holder");
+    ClearDepthSurfaces(context.device);
+}
+
 void TestLayeredRetirement(Context context) {
     ClearDepthSurfaces(context.device);
     context.limits.maxImageArrayLayers = 8;
@@ -433,7 +453,11 @@ void TestLayeredRetirement(Context context) {
     DepthSurfaceView(context, {0xb2000000, 0, target.extent, VK_FORMAT_D32_SFLOAT, 1.0f, 0});
     Require(DepthSurfacesReleased() == released, "a retired slice referenced by a layered group must not be released");
     Require(DepthSurfaceView(context, target, 2) == view, "rebinding a layered group must retain its retired slice");
-    Require(imageViews.at(view).image == image, "rebinding a layered group must preserve its image");
+    Require(std::find(destroyedImages.begin(), destroyedImages.end(), image) == destroyedImages.end(), "rebinding a layered group must preserve its image");
+    auto subset = target;
+    subset.firstSlice = subset.lastSlice = 1;
+    const auto subsetView = DepthSurfaceView(context, subset, 1);
+    Require(imageViews.at(subsetView).image == image, "a subset view must retain the containing group image after retirement");
     ClearDepthSurfaces(context.device);
 }
 
@@ -597,6 +621,7 @@ void RunDepthSurfaceReuseTests() {
         Require(clearsAfter(2u * sliceHtile) == std::vector<VkImage>{firstImage, secondImage}, "an HTILE clear over both slices must clear both");
     }
     TestRetiredSurfaceRelease(context);
+    TestRetiredStencilCopy(context);
     TestLayeredRetirement(context);
 
     ClearDepthSurfaces(context.device);

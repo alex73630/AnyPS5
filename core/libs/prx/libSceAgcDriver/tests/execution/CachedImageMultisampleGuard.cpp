@@ -213,10 +213,16 @@ void CheckMultisampleTable(AgcDriver::VulkanDevice& device) {
     image.guestDescriptor = {static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (56u << 20u) | (((Side - 1u) & 3u) << 30u), ((Side - 1u) >> 2u) | ((Side - 1u) << 14u), 0xfacu | (2u << 16u) | (0x1bu << 20u) | (14u << 28u), 0u, 2u << 4u, 0u, 0u};
     program.bindings.push_back(image);
     const CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+    AgcDriver::GuestMemory::BumpCollectEpoch();
     ShaderResources resources(context, shader);
     Require(resources.SampledTextures().size() == 1u, "the native multisample table entry was rejected during construction");
     Require(resources.Reusable(), "the native multisample table did not reach resource validation");
     static_cast<void>(resources.Revalidate(shader));
+    const auto before = ImageTableReuses();
+    ShaderResources again(context, shader);
+    Require(ImageTableReuses().resolved > before.resolved && ImageTableReuses().replayed == before.replayed, "native multisample target tables must resolve their live views instead of replaying snapshot textures");
+    Require(again.Reusable(), "the repeated multisample color table must reach resource validation");
+    static_cast<void>(again.Revalidate(shader));
     device.SubmitRecorded(true);
     device.WaitIdle();
     std::puts("native multisample table validation did not reject its color target");
