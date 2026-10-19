@@ -920,6 +920,7 @@ private:
     struct StencilCopy {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
+        std::shared_ptr<OwnedImage> owned;
         std::unique_ptr<DeviceBuffer> staging;
         std::map<std::array<std::uint32_t, 13>, std::shared_ptr<Texture>> textures;
         std::uint64_t written = 0;
@@ -1024,6 +1025,7 @@ private:
                 allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
                 stencilCopy.memory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory stencil copy");
                 Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, stencilCopy.image, stencilCopy.memory, 0), "vkBindImageMemory stencil copy");
+                stencilCopy.owned = std::make_shared<OwnedImage>(this->context, stencilCopy.image, stencilCopy.memory);
                 stencilCopy.staging = std::make_unique<DeviceBuffer>(context, static_cast<std::size_t>(target.extent.width) * target.extent.height, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             } catch (...) {
                 releaseStencilCopy();
@@ -1036,7 +1038,7 @@ private:
         }
         auto& texture = stencilCopy.textures[key];
         if (texture == nullptr) {
-            texture = std::make_shared<Texture>(context, stencilCopy.image, VK_FORMAT_R8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, components, viewType);
+            texture = std::make_shared<Texture>(context, stencilCopy.image, VK_FORMAT_R8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, components, viewType, 0u, stencilCopy.owned);
             texture->MarkRefreshedPerUse();
         }
         return texture;
@@ -1078,8 +1080,11 @@ private:
     void releaseStencilCopy() noexcept {
         stencilCopy.textures.clear();
         stencilCopy.staging.reset();
-        if (stencilCopy.image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, stencilCopy.image, nullptr);
-        if (stencilCopy.memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, stencilCopy.memory, nullptr);
+        if (stencilCopy.owned != nullptr) stencilCopy.owned.reset();
+        else {
+            if (stencilCopy.image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, stencilCopy.image, nullptr);
+            if (stencilCopy.memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, stencilCopy.memory, nullptr);
+        }
         stencilCopy = {};
     }
 
