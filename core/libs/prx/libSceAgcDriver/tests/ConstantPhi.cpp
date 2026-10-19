@@ -199,9 +199,10 @@ void CheckLongAncillaryForwarding() {
     Require(run.error.empty(), "long ancillary forwarding: folding failed");
 }
 
-void CheckDeepAncillary(bool whole) {
+void CheckDeepAncillary(bool whole, bool iteratesSamples) {
     IrProgram program;
     program.Resources().stage = IrShaderStage::Pixel;
+    program.Metadata().pixelIteratesSamples = iteratesSamples;
     auto& block = program.CreateBlock();
     program.SetEntryBlock(block);
     program.BlockOrder().push_back(&block);
@@ -238,7 +239,9 @@ void CheckDeepAncillary(bool whole) {
         Require(ancillary.OperandUses().empty(), "deep ancillary forwarding retained the packed input");
         Require(extract.Argument(0) == tail && extract.Argument(1)->ImmediateU32() == 8u, "deep ancillary forwarding changed a downstream field extraction");
     } else {
-        Require(extract.Argument(0)->Resolve()->Opcode() == IrOpcode::GetBuiltin && extract.Argument(0)->Resolve()->Argument(0)->ImmediateU32() == static_cast<std::uint32_t>(StageInputKind::SampleId), "deep ancillary direct extraction lost its sample ID");
+        const auto* sample = extract.Argument(0)->Resolve();
+        if (iteratesSamples) Require(sample->Opcode() == IrOpcode::GetBuiltin && sample->Argument(0)->ImmediateU32() == static_cast<std::uint32_t>(StageInputKind::SampleId), "deep ancillary direct extraction lost its sample ID");
+        else Require(sample->HasImmediate() && sample->ImmediateU32() == 0u, "a once-per-pixel ancillary extraction retained a sample ID");
         Require(extract.Argument(1)->ImmediateU32() == 0u && first.Argument(0) == &ancillary, "deep ancillary direct extraction changed a whole-word reader");
     }
 }
@@ -250,8 +253,10 @@ int main() {
         for (unsigned mode = 0; mode < 5u; ++mode) CheckDiamond(mode);
         CheckLongAncillaryForwarding();
         CheckUnobservedPhiCycles();
-        CheckDeepAncillary(true);
-        CheckDeepAncillary(false);
+        for (const bool iteratesSamples : {false, true}) {
+            CheckDeepAncillary(true, iteratesSamples);
+            CheckDeepAncillary(false, iteratesSamples);
+        }
         std::puts("constant phi dominance tests passed");
         return 0;
     } catch (const std::exception& error) {
