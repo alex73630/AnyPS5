@@ -2521,6 +2521,14 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_draw_cache_immediate_eviction PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test(NAME agc_driver_storage_flush_read_only COMMAND agc_driver_storage_flush_ordering_tests --read-only)
+    set_tests_properties(agc_driver_storage_flush_read_only PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_BDA_FLUSH=1;APS5_BARRIER_VALIDATE=1"
+            SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_driver_storage_flush_read_only PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     set_tests_properties(agc_driver_storage_file_write PROPERTIES TIMEOUT 30 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_SUSPEND_DRAIN=1")
     set_tests_properties(agc_driver_clamped_global_fill PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_LABEL_READBACK_STORE=1")
     set_tests_properties(agc_driver_draw_pipeline_trace PROPERTIES

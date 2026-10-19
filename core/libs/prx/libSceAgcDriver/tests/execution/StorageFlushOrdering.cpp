@@ -24,6 +24,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace AgcDriver {
@@ -175,19 +176,21 @@ void MixedStageLeases(AgcDriver::VulkanDevice& device, const GuestBlock& guest) 
     const auto reader = Compile(ReadGlobalCode, data, device.Target());
     const auto writer = Compile(StoreGlobalCode, data, device.Target());
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
-    for (const bool vertexStores : {false, true}) {
+    for (const auto& [vertexStores, fragmentStores] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {false, true}}}) {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         const auto vertex = vertexStores ? writer : reader;
-        auto fragment = vertexStores ? reader : writer;
+        auto fragment = fragmentStores ? writer : reader;
         for (auto& binding : fragment.bindings) binding.binding += static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
         const std::array<CompiledShader, 2> stages{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::Fragment, &fragment, 0}}};
         ShaderResources resources(context, stages, ColorTarget{}, 0, 0, 0);
-        Require(resources.HoldsLease() && !resources.BdaReadOnly(), "a mixed-stage build lost its store-capable lease");
+        const bool stores = vertexStores || fragmentStores;
+        Require(resources.HoldsLease() && resources.BdaReadOnly() == !stores, "a graphics build has the wrong lease access classification");
         auto* recorder = Recorder::Active();
         Require(recorder != nullptr, "the mixed-stage fixture has no recorder");
         resources.MarkGpuWrites(*recorder);
         const auto read = recorder->DescribePendingRead(guest.Address(), 4u);
-        Require(read && read->kind == Recorder::ReadKind::AddressBased && recorder->PendingWriterSerial(guest.Address(), 4u) == recorder->OpenSerial(), "a storing stage was hidden by a read-only stage");
+        const auto kind = stores ? Recorder::ReadKind::AddressBased : Recorder::ReadKind::AddressRead;
+        Require(read && read->kind == kind && recorder->PendingWriterSerial(guest.Address(), 4u) == (stores ? recorder->OpenSerial() : 0u), "a graphics build has the wrong pending writer classification");
         recorder->Sync();
         resources.WriteBack();
         resources.EndUse();
@@ -207,8 +210,8 @@ void ReadOnly(AgcDriver::VulkanDevice& device, const GuestBlock& guest) {
     const auto writer = Compile(StoreImageCode, ImageUserData(image), device.Target());
     const auto reader = Compile(ReadGlobalCode, data, device.Target());
     Require(!SpirvStoresThroughAddresses(reader.spirv.Words()), "the read-only fixture stores through addresses");
-    device.Dispatch(writer, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(StoreImageCode.data()));
     device.Dispatch(reader, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(ReadGlobalCode.data()));
+    device.Dispatch(writer, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(StoreImageCode.data()));
     {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         const auto* recorder = Recorder::Active();
@@ -221,6 +224,7 @@ void ReadOnly(AgcDriver::VulkanDevice& device, const GuestBlock& guest) {
         Require(recorder->OpenSerial() == serial && recorder->Submissions() == submissions, "flushing behind a read-only lease submitted its batch");
     }
     device.WaitIdle();
+    Require(guest.Words()[BlockBytes / 16u] == Stored, "the read-only flush lost the texel overlapping the earlier reader");
     Require(guest.Words()[BlockBytes / 16u + FarDword] == Stored, "the read-only flush lost the pending image texel");
     Require(ReadOutput[0] == Initial, "the address-based reader saw the subsequent image write-back");
     Require(std::all_of(ReadOutput.begin(), ReadOutput.end(), [](auto value) { return value == Initial; }), "the read-only fixture lost its buffer stores");
@@ -228,16 +232,18 @@ void ReadOnly(AgcDriver::VulkanDevice& device, const GuestBlock& guest) {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         const bool watched = AgcDriver::GuestMemory::WriteWatched();
         GuestBlock guest(watched);
-        if (!watched) std::puts("guest memory has no write watch: the writer-in-flight case is skipped");
-        else if (!device->CanWaitUnlocked()) std::puts("the recorder cannot wait for the GPU without running completions: the writer-in-flight case is skipped");
-        else Run(*device, guest, 0, true, "writer in flight");
-        Run(*device, guest, BlockBytes / 2u, false, "writer in the open batch");
+        if (argc != 2 || std::string(argv[1]) != "--read-only") {
+            if (!watched) std::puts("guest memory has no write watch: the writer-in-flight case is skipped");
+            else if (!device->CanWaitUnlocked()) std::puts("the recorder cannot wait for the GPU without running completions: the writer-in-flight case is skipped");
+            else Run(*device, guest, 0, true, "writer in flight");
+            Run(*device, guest, BlockBytes / 2u, false, "writer in the open batch");
+        }
         ReadOnly(*device, guest);
         MixedStageLeases(*device, guest);
         std::puts("storage flush ordering tests passed");

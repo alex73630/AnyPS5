@@ -42,6 +42,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_PERF_DISK_PLANS` | presence | `core/shader/recompiler/Recompiler.cpp` |  | disables the disk cache of planning results |
 | `APS5_NO_PERF_DOM_INTERSECTION` | presence | `core/shader/recompiler/ControlFlow/src/Structurizer.cpp` |  | computes dominator intersections into a fresh vector instead of intersecting in place |
 | `APS5_NO_PERF_ITERATION_SELECTION` | presence | `core/shader/recompiler/ControlFlow/src/Structurizer.cpp` |  | recomputes the post-dominator sets when finding a loop's iteration-selection merge instead of reusing them |
+| `APS5_NO_READ_ONLY_LEASES` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | treats read-only address-based leases as potential writers when flushing pending texture stores; diagnostic comparison for lease synchronization |
 | `APS5_NO_RESULT_MEMO` | presence | `core/shader/recompiler/Recompiler.cpp` |  | materializes a fresh result for every recompile instead of reusing the result memo |
 | `APS5_NO_SRT_TAPE` | presence | `core/shader/recompiler/Optimization/src/SrtWalker/SrtTape.cpp` |  | runs the runtime-source walk of a plan in the IR evaluator instead of the compiled tape |
 | `APS5_NO_TABLE_RESOLUTION_REUSE` | presence | `core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp` |  | stops a result memo miss from reusing an unchanged image table's resolution, so the table is resolved again |
@@ -274,7 +275,6 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_LAYER_CLEAR` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | tracks every surface as one layer instead of per array layer |
 | `APS5_NO_LAYER_REFUSAL_MEMO` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | re-checks a layer whose surface check failed at its current generation on every fill |
 | `APS5_NO_LAYOUT_CACHE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | builds descriptor set layouts fresh instead of through the descriptor cache |
-| `APS5_NO_READ_ONLY_LEASES` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | treats read-only address-based leases as potential writers when flushing pending texture stores; diagnostic comparison for lease synchronization |
 | `APS5_NO_LEASE_MIRROR` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | restores copies instead of image mirrors for address-based builds |
 | `APS5_NO_LIBRARY_PREBUILD` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp` |  | disables prebuilding registration-form shader libraries (only 1 disables it) |
 | `APS5_NO_LOCK_PROFILE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | turns off GpuMutex wait profiling under APS5_PROFILE_DRAW |
