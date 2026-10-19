@@ -4024,7 +4024,7 @@ std::array<AdmissionCounts, 2>& DrawAdmissionCounts() {
     return counts;
 }
 
-constexpr std::array AdmissionNames{"copied-writes", "lease", "multisample", "loop-guard", "unresolved-table", "refreshed-texture", "large-data", "regions", "serial", "reusable", "no-build", "uncacheable", "unrecorded", "not-reusable", "attempt", "uncached-storage", "released-texture", "inserted", "replaced", "evicted"};
+constexpr std::array AdmissionNames{"copied-writes", "lease", "multisample", "loop-guard", "unresolved-table", "refreshed-texture", "large-data", "regions", "serial", "reusable", "no-build", "uncacheable", "unrecorded", "not-reusable", "attempt", "uncached-storage", "released-texture", "inserted", "replaced", "evicted", "incumbent-in-use"};
 static_assert(AdmissionNames.size() == static_cast<std::size_t>(ResourceCache::Admission::Count));
 
 void ReportDrawAdmission() {
@@ -4160,6 +4160,11 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
     if (!resources->HasCachedStorageImages()) return count(Admission::UncachedStorage);
     if (resources->HoldsReleasedTexture()) return count(Admission::ReleasedTexture);
     if (const auto found = index.find(key); found != index.end()) {
+        if (found->second->second->InUse()) {
+            entries.splice(entries.begin(), entries, found->second);
+            noteUse(key);
+            return count(Admission::IncumbentInUse);
+        }
         count(Admission::Replaced);
         if (evicted != nullptr) evicted->push_back(std::move(found->second->second));
         entries.erase(found->second);

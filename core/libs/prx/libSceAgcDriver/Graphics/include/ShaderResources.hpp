@@ -723,7 +723,7 @@ public:
     enum class Admission {
         CopiedWrites, Lease, Multisample, LoopGuard, UnresolvedTable, RefreshedTexture,
         LargeData, Regions, Serial, Reusable, NoBuild, Uncacheable, Unrecorded,
-        NotReusable, Attempt, UncachedStorage, ReleasedTexture, Inserted, Replaced, Evicted, Count
+        NotReusable, Attempt, UncachedStorage, ReleasedTexture, Inserted, Replaced, Evicted, IncumbentInUse, Count
     };
     static void CountAdmission(Admission reason, bool addressBased);
     using Key = std::vector<std::uint32_t>;
