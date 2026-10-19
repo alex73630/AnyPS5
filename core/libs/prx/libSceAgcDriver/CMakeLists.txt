@@ -2526,6 +2526,14 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     set_tests_properties(agc_driver_pixel_implicit_derivatives PROPERTIES TIMEOUT 30)
+    add_test(NAME agc_driver_address_draw_reuse_probe COMMAND agc_driver_address_draw_reuse_tests)
+    set_tests_properties(agc_driver_address_draw_reuse_probe PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_PROBE_IN_FLIGHT_REUSE=1"
+            SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_driver_address_draw_reuse_probe PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test(NAME agc_driver_draw_cache_immediate_eviction COMMAND agc_driver_address_draw_reuse_tests --eviction)
     set_tests_properties(agc_driver_draw_cache_immediate_eviction PROPERTIES
             ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_DEFERRED_EVICTION=1"

@@ -3530,20 +3530,21 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
     return proveBuild(shaders, report);
 }
 
-bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report, std::span<const GuestMemorySnapshot> snapshots) {
+bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report, std::span<const GuestMemorySnapshot> snapshots, InFlight inFlight) {
     if (!addressReuse) return revalidateFull(shaders, report);
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const auto refuse = [&](AddressReuse reason) {
-        CountAddressReuse(reason, profile ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()) : 0);
-        return false;
-    };
-    CountAddressReuseProof();
     ProofReport proof;
     auto& outcome = report != nullptr ? *report : proof;
     outcome = {ProofPath::Full, ProofFailure::Other};
+    const auto refuse = [&](AddressReuse reason) {
+        outcome.refusal = reason;
+        if (inFlight != InFlight::Probe) CountAddressReuse(reason, profile ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()) : 0);
+        return false;
+    };
+    if (inFlight != InFlight::Probe) CountAddressReuseProof();
     if (!reusable) return refuse(AddressReuse::NotReusable);
-    if (InUse()) return refuse(AddressReuse::InUse);
+    if (InUse() && inFlight == InFlight::Refuse) return refuse(AddressReuse::InUse);
     CompleteSnapshotWrites(snapshots);
     const auto snapshotMatch = guestMemory.MatchSnapshots(snapshots);
     if (snapshotMatch == SnapshotMatch::Refused) return refuse(AddressReuse::Snapshots);

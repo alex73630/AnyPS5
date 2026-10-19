@@ -1726,9 +1726,32 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
         if (inUse) {
             CountAddressReuse(AddressReuse::InUse);
             PerformanceTrace::Count("DrawResources", "in-use");
-            const auto* recorder = Recorder::Active();
-            const bool sameBatch = recorder != nullptr && cached->LastRecordedSerial() != 0 && cached->LastRecordedSerial() == recorder->OpenSerial();
+            auto* recorder = Recorder::Active();
+            const auto batchBefore = recorder != nullptr ? recorder->OpenSerial() : 0u;
+            const bool sameBatch = batchBefore != 0 && cached->LastRecordedSerial() == batchBefore;
             PerformanceTrace::Count("DrawResources", sameBatch ? "in-use-same-batch" : "in-use-other-batch");
+            static const bool probe = std::getenv("APS5_PROBE_IN_FLIGHT_REUSE") != nullptr;
+            if (probe && cached->ReusesAddressSpace()) {
+                PerformanceTimer probeTiming("DrawResources.probe.in-use", true);
+                ResourceUse probeUse;
+                probeUse.resources = cached;
+                ShaderResources::ProofReport proof;
+                const bool proved = cached->Revalidate(shaders, &proof, snapshots, ShaderResources::InFlight::Probe);
+                recorder = Recorder::Active();
+                std::optional<std::vector<ShaderResources::MovedBuffer>> moved;
+                if (proved && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder);
+                if (!proved) {
+                    constexpr std::array reasons{"reused", "not-reusable", "in-use", "snapshots", "space", "proof", "imports", "threw", "moved", "unknown"};
+                    PerformanceTrace::Count("DrawResources.in-flight-probe.refused", reasons[static_cast<std::size_t>(proof.refusal)]);
+                } else if (!moved.has_value()) {
+                    PerformanceTrace::Count("DrawResources.in-flight-probe", "moved-refused");
+                } else {
+                    PerformanceTrace::Count("DrawResources.in-flight-probe", "proved");
+                    if (sameBatch) PerformanceTrace::Count("DrawResources.in-flight-probe", "proved-same-batch");
+                    if (cached->BdaReadOnly()) PerformanceTrace::Count("DrawResources.in-flight-probe", "proved-read-only");
+                }
+                if (sameBatch && (recorder == nullptr || batchBefore != recorder->OpenSerial())) PerformanceTrace::Count("DrawResources.in-flight-probe", "submitted-during-proof");
+            }
         }
         if (cached != nullptr && !inUse) {
             const bool addressBased = cached->ReusesAddressSpace();
@@ -2262,7 +2285,10 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         recorder->FlushStores();
         outcome.storesFlushed = true;
     }
-    const auto drawBindings = resources.PrepareDrawBindings(*recorder, record.moved);
+    const auto drawBindings = [&] {
+        PerformanceTimer bindingsTiming(record.moved.empty() ? "DrawResources.bindings.own" : "DrawResources.bindings.rewritten", true);
+        return resources.PrepareDrawBindings(*recorder, record.moved);
+    }();
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
     const bool addressBased = resources.HoldsLease();

@@ -779,6 +779,17 @@ void RetainInFlightCacheEntry(AgcDriver::VulkanDevice& device) {
     cache.Insert(key, replacement, &evicted);
     Require(cache.Find(key) == first && cache.Size() == 1 && evicted.empty(), "inserting the same key displaced an in-flight cache entry");
     Require(replacement.use_count() == 1, "the cache retained the rejected replacement");
+    const auto beforeProbe = AddressReuseCounters();
+    ShaderResources::ProofReport proof;
+    Require(first->Revalidate(stages, &proof, snapshots, ShaderResources::InFlight::Probe), "the in-flight probe refused an unchanged incumbent");
+    first->EndUse();
+    const std::array<std::uint32_t, 2> changed{0, 0};
+    const std::array<GuestMemorySnapshot, 1> changedSnapshots{{{memory.Address(), std::as_bytes(std::span(changed))}}};
+    Require(!first->Revalidate(stages, &proof, changedSnapshots, ShaderResources::InFlight::Probe) && proof.refusal == AddressReuse::Snapshots, "the in-flight probe accepted a changed snapshot shape or lost its refusal reason");
+    first->EndUse();
+    const auto afterProbe = AddressReuseCounters();
+    Require(afterProbe.proofs == beforeProbe.proofs && afterProbe.outcomes == beforeProbe.outcomes, "the in-flight probe changed ordinary reuse counters");
+    Require(first->InUse() && cache.Find(key) == first && cache.Size() == 1, "the in-flight probe released or replaced its incumbent");
     held.reset();
     Require(!first->InUse() && first->Revalidate(stages, nullptr, snapshots), "the retained entry could not be reused after completion");
     first->EndUse();
