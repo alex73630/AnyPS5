@@ -133,6 +133,13 @@ class TraceDigestTests(unittest.TestCase):
         self.assertTrue(result["counter_data_complete"])
         self.assertIn("Missing slices must not be interpreted as idle", trace_digest.markdown(result))
 
+    def test_gpu_slice_overflow_without_timestamp_marks_all_frames(self):
+        summary = dict(SUMMARY, trace_dropped_threads={"gpu": {"events_lost": 2}})
+        result = trace_digest.digest(trace_digest.Trace({"traceEvents": EVENTS}), summary)
+        self.assertFalse(result["slice_data_complete"])
+        self.assertTrue(result["counter_data_complete"])
+        self.assertTrue(all(not frame["slice_data_complete"] and frame["slice_incomplete_threads"] == ["gpu"] for frame in result["frame_details"]))
+
     def test_perf_thread_identity_and_zero_alignment_warning(self):
         events = EVENTS + [{"ph": "M", "name": "thread_name", "tid": 1, "args": {"name": "queue worker 0x0", "os_tid": 11}}]
         trace = trace_digest.Trace({"traceEvents": events, "steady_clock_origin_ns": 10000000000})

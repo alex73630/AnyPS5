@@ -206,7 +206,7 @@ std::unordered_map<std::uint64_t, bool>& CpuIndirectPrograms() {
 
 }
 
-DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::string& rejected) {
+DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::string& rejected, bool captureRetry) {
     PerformanceTimer timing("Driver.Draw");
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     auto tailHolder = std::make_shared<DrawTail>();
@@ -218,7 +218,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     phaseLap = profile || phaseTrace != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     tail.profile = profile;
     tail.phaseTiming.profile = profile;
-    DrawPhaseTiming phaseTiming{profile, phaseMs, phaseLap, phaseTrace, phaseLap};
+    DrawPhaseTiming phaseTiming{profile, phaseMs, phaseLap, phaseTrace, phaseLap, !captureRetry};
     if (profile && packetStartedAt() != std::chrono::steady_clock::time_point{}) phaseMs[DrawRowPrologue] = std::chrono::duration<double, std::milli>(phaseLap - packetStartedAt()).count();
 
     const auto drawn = [&] {
@@ -364,6 +364,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         maybeReportDrawCache(profile);
     }
     if (decode != nullptr && !DecodeProgramsCurrent(*decode, *submission.shaders)) {
+        PerformanceTrace::Count("DrawShaderLookup", "decode-stale");
         userPatches.clear();
         std::lock_guard cacheLock(drawCacheMutex);
         eraseDrawEntry(drawKey, entry);
@@ -621,7 +622,7 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
     auto& phaseMs = tail.phaseMs;
     auto phaseLap = std::chrono::steady_clock::now();
     auto& captures = tail.captures;
-    DrawPhaseTiming phaseTiming{profile, phaseMs, phaseLap, PerformanceTrace::DetailedThread(), phaseLap};
+    DrawPhaseTiming phaseTiming{profile, phaseMs, phaseLap, PerformanceTrace::DetailedThread(), phaseLap, false};
     auto& drawParameters = tail.drawParameters;
     const bool pipelined = tail.pipelined;
     static const bool pipelinedIndirect = std::getenv("APS5_NO_PIPELINED_INDIRECT") == nullptr;
@@ -838,7 +839,10 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
     }
 
     if (tail.queue != nullptr && pipelined && !deferredLabels().labels.empty()) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Labels);
-    if (tail.queue != nullptr && recordQueuedLabelsAfterCapture(submission.queue, memory)) return draw(*tail.queue, tail.packet, submission, rejected);
+    if (tail.queue != nullptr && recordQueuedLabelsAfterCapture(submission.queue, memory)) {
+        PerformanceTrace::Count("Driver.Draw", "capture-retry");
+        return draw(*tail.queue, tail.packet, submission, rejected, true);
+    }
 
     bool rectListBuilt = false;
 
@@ -1052,7 +1056,7 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
         DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), true);
-        phaseTiming.Phase(DrawRowLockWait);
+        phaseTiming.Phase(DrawRowEnqueue);
         timing.Mark("draw_enqueued");
         return drawn();
     }
