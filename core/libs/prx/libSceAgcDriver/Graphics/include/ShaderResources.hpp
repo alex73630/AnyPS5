@@ -326,7 +326,7 @@ public:
     bool DataWordsDiffer(const CompiledShader& shader) const;
     // Why the fast proof of a Revalidate left the object to the full walk (the [rescache]
     // revalidate line's reasons); Count: it did not.
-    enum class FastFail : std::size_t { NoRecord, Collect, Pending, Evicted, Changed, Keys, ClearedView, StorageKeys, Depth, Replaced, Audit, Count };
+    enum class FastFail : std::size_t { NoRecord, Collect, Pending, Evicted, Changed, Keys, ClearedView, StorageKeys, Depth, Replaced, Audit, RefreshedPerUse, Count };
     // Why a Pending failure was left to the full walk instead of the own-object refresh (T1, see
     // refreshOwnObjects); Count: it was not.
     enum class OwnRefreshFallback : std::size_t { Disabled, Snapshot, Keys, ForeignView, SurfaceKey, NotImported, Uncached, Rerun, Count };
@@ -645,6 +645,7 @@ private:
     };
     std::vector<SamplerSource> samplerSources;
     bool reusable = false;
+    bool refreshesPerUse = false;
     bool addressReuse = false;
     bool reuseProved = false;
     std::shared_ptr<std::atomic<std::uint32_t>> usesInFlight = std::make_shared<std::atomic<std::uint32_t>>(0u);

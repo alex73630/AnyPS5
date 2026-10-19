@@ -1,8 +1,11 @@
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
@@ -46,6 +49,7 @@ PFN_vkCmdCopyImageToBuffer realCopyImageToBuffer = nullptr;
 PFN_vkCmdCopyBufferToImage realCopyBufferToImage = nullptr;
 std::atomic<std::uint32_t> imageToBufferCopies{0};
 std::atomic<std::uint32_t> bufferToImageCopies{0};
+VkBuffer lastUploadBuffer = VK_NULL_HANDLE;
 
 VKAPI_ATTR void VKAPI_CALL CountImageToBuffer(VkCommandBuffer commands, VkImage image, VkImageLayout layout, VkBuffer buffer, std::uint32_t count, const VkBufferImageCopy* regions) {
     imageToBufferCopies.fetch_add(1);
@@ -54,6 +58,7 @@ VKAPI_ATTR void VKAPI_CALL CountImageToBuffer(VkCommandBuffer commands, VkImage 
 
 VKAPI_ATTR void VKAPI_CALL CountBufferToImage(VkCommandBuffer commands, VkBuffer buffer, VkImage image, VkImageLayout layout, std::uint32_t count, const VkBufferImageCopy* regions) {
     bufferToImageCopies.fetch_add(1);
+    lastUploadBuffer = buffer;
     realCopyBufferToImage(commands, buffer, image, layout, count, regions);
 }
 
@@ -141,6 +146,7 @@ public:
             context.limits = properties.limits;
             context.bufferDeviceAddress = true;
             context.formatProperties = function<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
+            context.imageFormatProperties = function<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties");
             context.Function<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(context.device, family, 0, &context.queue);
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -166,6 +172,7 @@ private:
     }
 
     void release() noexcept {
+        if (context.device != VK_NULL_HANDLE) ClearCachedTextures(context.device);
         if (context.device != VK_NULL_HANDLE) ClearDepthSurfaces(context.device);
         if (context.pool != VK_NULL_HANDLE) context.Function<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(context.device, context.pool, nullptr);
         context.bufferPool.reset();
@@ -322,6 +329,92 @@ void RecordedUploads(const Context& context, const WatchedBlock& block) {
     recorder.Sync();
 }
 
+void ReusedDrawResources(const Context& base, const WatchedBlock& block) {
+    PlaceholderImages placeholders(base);
+    auto context = base;
+    context.placeholderImages = &placeholders;
+    TextureCache textureCache(context);
+    context.textureCache = &textureCache;
+    const auto address = block.Address();
+    const DepthTarget slice{address, 0, {Side, Side}, VK_FORMAT_D32_SFLOAT, 1.0f, 0, 0};
+    DepthSurfaceView(context, slice);
+    FillLayer(block.Data() + LayerBytes, 0.25f);
+    const std::vector<std::uint32_t> descriptor{
+        static_cast<std::uint32_t>(address >> 8u),
+        static_cast<std::uint32_t>(address >> 40u) | (Format32Float << 20u) | (((Side - 1u) & 3u) << 30u),
+        ((Side - 1u) >> 2u) | ((Side - 1u) << 14u),
+        0xd1800facu, 1u, 0u, 0u, 0u,
+    };
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::RecompileResult fragment;
+    ShaderRecompiler::DescriptorBinding binding{ShaderRecompiler::DescriptorKind::SampledImage, ShaderRecompiler::DescriptorRole::GuestImages, 0u, 4u, 1u, descriptor, true};
+    binding.imageShape = ShaderRecompiler::DescriptorImageShape::Image2DArray;
+    binding.imageSamplers = {0u};
+    fragment.bindings.push_back(std::move(binding));
+    const std::array<CompiledShader, 2> stages{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0u}}};
+    Recorder recorder(context);
+    recorder.Activate();
+    ShaderResources resources(context, stages, ColorTarget{}, 0u, 0u, 0u);
+    Require(resources.Reusable(), "a draw sampling refreshed depth planes did not admit its resources for reuse");
+    recorder.Sync();
+    const auto revalidate = [&](const char* when, std::uint32_t fromSlices, std::uint32_t intoCopy) {
+        imageToBufferCopies = 0;
+        bufferToImageCopies = 0;
+        ShaderResources::ProofReport proof;
+        Require(resources.Revalidate(stages, &proof), std::string("depth plane draw resources failed revalidation ") + when);
+        Require(proof.path == ShaderResources::ProofPath::Full, "refreshed depth planes bypassed their lookups on reuse");
+        Require(imageToBufferCopies.load() == fromSlices && bufferToImageCopies.load() == intoCopy, std::string("depth plane draw reuse skipped or repeated a required transfer ") + when);
+        recorder.Sync();
+        resources.EndUse();
+    };
+    revalidate("while its depth surface is current", 1u, 1u);
+    const DepthTarget other{address + 2u * BlockBytes, 0, {Side, Side}, VK_FORMAT_D32_SFLOAT, 1.0f, 0, 0};
+    DepthSurfaceView(context, other);
+    revalidate("after the depth draw", 1u, 1u);
+    revalidate("without intervening writes", 0u, 0u);
+    FillLayer(block.Data() + LayerBytes, 0.75f);
+    revalidate("after a CPU write to the guest layer", 0u, 1u);
+    revalidate("after the guest layer refresh", 0u, 0u);
+    DepthSurfaceView(context, slice);
+    revalidate("after another depth draw", 1u, 1u);
+    ClearDepthSurfaces(context.device);
+    Require(!resources.Revalidate(stages), "draw resources reused a depth plane view after its owner was removed");
+    recorder.Sync();
+    const auto stencilAddress = address + LayerBytes;
+    const DepthTarget stencilTarget{address, stencilAddress, {Side, Side}, VK_FORMAT_D32_SFLOAT_S8_UINT, 1.0f, 0u, 0u};
+    DepthSurfaceView(context, stencilTarget);
+    auto& stencilBinding = fragment.bindings.front();
+    stencilBinding.binding = 3u;
+    stencilBinding.imageShape = ShaderRecompiler::DescriptorImageShape::Image2D;
+    stencilBinding.guestDescriptor[0] = static_cast<std::uint32_t>(stencilAddress >> 8u);
+    stencilBinding.guestDescriptor[1] = static_cast<std::uint32_t>(stencilAddress >> 40u) | (1u << 20u) | (((Side - 1u) & 3u) << 30u);
+    stencilBinding.guestDescriptor[3] = 0x91800facu;
+    stencilBinding.guestDescriptor[4] = 0u;
+    ShaderResources stencilResources(context, stages, ColorTarget{}, 0u, 0u, 0u);
+    Require(stencilResources.Reusable(), "a draw sampling a refreshed stencil plane did not admit its resources for reuse");
+    recorder.Sync();
+    DepthSurfaceView(context, other);
+    for (const auto pattern : {0x34343434u, 0xa7a7a7a7u}) {
+        NoteDepthMetadataFill(stencilAddress, DepthSliceBytes({Side, Side}, 1u), pattern);
+        imageToBufferCopies = 0;
+        bufferToImageCopies = 0;
+        ShaderResources::ProofReport proof;
+        Require(stencilResources.Revalidate(stages, &proof), "a draw sampling rewritten stencil failed revalidation");
+        Require(proof.path == ShaderResources::ProofPath::Full && imageToBufferCopies == 1u && bufferToImageCopies == 1u, "stencil reuse skipped its refresh through a depth identity proof");
+        recorder.Sync();
+        Buffer readback(context, Side * Side, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        CommandBatch batch(context);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        CopyBuffer(context, batch.Handle(), lastUploadBuffer, 0u, readback.Handle(), 0u, Side * Side);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        readback.Invalidate();
+        Require(std::ranges::all_of(readback.Bytes(), [pattern](std::byte value) { return value == std::byte(pattern & 0xffu); }), "reused stencil descriptors copied stale GPU plane contents");
+        stencilResources.EndUse();
+    }
+    ClearDepthSurfaces(context.device);
+}
+
 void RunCubeGather(const Context& base, const WatchedBlock& block) {
     TextureDetiler detiler(base);
     auto context = base;
@@ -418,6 +511,7 @@ int main() {
             RecordedUploads(context, block);
             RunCubeGather(context, block);
             RunCubeTiledSlice(context, block);
+            ReusedDrawResources(context, block);
         }
         device.reset();
         std::puts("depth plane guest layer tests passed");
