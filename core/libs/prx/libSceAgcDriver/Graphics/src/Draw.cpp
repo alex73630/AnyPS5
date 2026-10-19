@@ -661,6 +661,7 @@ struct DrawProfile {
     // Draw packets that drew nothing, by DrawSkip, and their time.
     std::array<std::uint64_t, static_cast<std::size_t>(DrawSkip::Count)> skips{};
     std::array<double, static_cast<std::size_t>(DrawSkip::Count)> skipUs{};
+    std::array<std::uint64_t, static_cast<std::size_t>(ShaderResources::MoveRefusal::Count)> addressMoveRefusals{};
     AddressReuseStats reuseSeen;
     LeaseStats leaseSeen;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
@@ -790,6 +791,14 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     if (reuse.movedSnapshotCandidates != reuseSeen.movedSnapshotCandidates || reuseCount(AddressReuse::Snapshots) != 0) {
         const auto missed = [&](SnapshotReuseMiss kind) { return static_cast<unsigned long long>(reuse.snapshotMisses[static_cast<std::size_t>(kind)] - reuseSeen.snapshotMisses[static_cast<std::size_t>(kind)]); };
         std::fprintf(stderr, "[rescache] moved snapshots: %llu candidates, %llu proofs passed, %llu draws reused, %llu refused by buffer-move check; snapshot refusals: copied captures %llu, outside live space %llu, image or sampler tables %llu\n", static_cast<unsigned long long>(reuse.movedSnapshotCandidates - reuseSeen.movedSnapshotCandidates), static_cast<unsigned long long>(reuse.movedSnapshotProofs - reuseSeen.movedSnapshotProofs), static_cast<unsigned long long>(reuse.movedSnapshotReused - reuseSeen.movedSnapshotReused), static_cast<unsigned long long>(reuse.movedSnapshotBuffersRefused - reuseSeen.movedSnapshotBuffersRefused), missed(SnapshotReuseMiss::MovedCopied), missed(SnapshotReuseMiss::MovedOutside), missed(SnapshotReuseMiss::MovedTables));
+    }
+    if (std::any_of(profile.addressMoveRefusals.begin(), profile.addressMoveRefusals.end(), [](auto count) { return count != 0; })) {
+        std::fprintf(stderr, "[rescache] address buffer move refusals:");
+        for (std::size_t reason = 0; reason < profile.addressMoveRefusals.size(); ++reason) {
+            if (profile.addressMoveRefusals[reason] != 0) std::fprintf(stderr, " %s %llu;", ShaderResources::MoveRefusalName(static_cast<ShaderResources::MoveRefusal>(reason)), static_cast<unsigned long long>(profile.addressMoveRefusals[reason]));
+        }
+        std::fputc('\n', stderr);
+        profile.addressMoveRefusals.fill(0);
     }
     profile.reuseSeen = reuse;
     profile.leaseSeen = leases;
@@ -1713,7 +1722,9 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             const bool valid = cached->Revalidate(shaders, &proof, snapshots);
             auto* recorder = Recorder::Active();
             std::optional<std::vector<ShaderResources::MovedBuffer>> moved;
-            if (valid && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder);
+            ShaderResources::MoveProof moveProof;
+            moveProof.refusal = ShaderResources::MoveRefusal::NoRecorder;
+            if (valid && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder, &moveProof);
             if (moved.has_value()) {
                 resolved.resources = std::move(cached);
                 resolved.use.resources = resolved.resources;
@@ -1724,6 +1735,11 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 if (addressBased) CountAddressReuse(AddressReuse::Reused);
                 if (proof.movedSnapshots) CountMovedSnapshotUse(true);
             } else if (valid) {
+                if (addressBased && timer.profile) {
+                    auto& stats = Profile();
+                    std::lock_guard lock(stats.mutex);
+                    ++stats.addressMoveRefusals[static_cast<std::size_t>(moveProof.refusal)];
+                }
                 if (proof.movedSnapshots) CountMovedSnapshotUse(false);
                 if (addressBased) CountAddressReuse(AddressReuse::Moved, timer.profile ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - proofStart).count()) : 0);
                 cached->EndUse();

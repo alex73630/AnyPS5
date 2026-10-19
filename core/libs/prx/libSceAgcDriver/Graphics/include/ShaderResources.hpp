@@ -212,13 +212,13 @@ public:
         std::span<const std::uint32_t> words;
     };
     std::shared_ptr<DrawBindings> PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved = {}, bool movedOnly = false) const;
-    std::optional<std::vector<MovedBuffer>> MovedReadOnlyBuffers(std::span<const CompiledShader> shaders, Recorder& recorder) const;
-    enum class MoveRefusal : std::size_t { None, Shape, NotGuest, Written, Limit, Inaccessible, Overlap, Bindings, Count };
+    enum class MoveRefusal : std::size_t { None, Shape, NotGuest, Written, Limit, Inaccessible, Overlap, Bindings, DataPatch, AddressWrites, PendingWrites, StorageWrites, Shadowed, AddressBuffer, AddressState, NoRecorder, Count };
     struct MoveProof {
         MoveRefusal refusal = MoveRefusal::None;
         std::size_t buffers = 0;
         std::size_t bytes = 0;
     };
+    std::optional<std::vector<MovedBuffer>> MovedReadOnlyBuffers(std::span<const CompiledShader> shaders, Recorder& recorder, MoveProof* proof = nullptr) const;
     static const char* MoveRefusalName(MoveRefusal refusal);
     std::optional<std::vector<MovedBuffer>> MovedDispatchBuffers(const CompiledShader& shader, Recorder* recorder, std::size_t maxBytes, MoveProof& proof) const;
     static std::size_t MaxDrawSnapshotBytes();
