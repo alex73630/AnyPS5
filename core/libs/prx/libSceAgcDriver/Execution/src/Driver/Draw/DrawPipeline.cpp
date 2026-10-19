@@ -292,13 +292,15 @@ void DrawPipeline::rethrowFailure() {
 void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads, bool draw) {
     if (DrawFinisher::Busy() && !DrawFinisher::OnFinisherThread()) DrawFinisher::Get().Drain();
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    auto* trace = PerformanceTrace::DetailedThread();
     struct ReclaimStorage {};
     auto& reclaim = HostThreadLocal<std::vector<Item>, ReclaimStorage>();
     reclaim.clear();
-    const auto lockStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto lockStart = profile || trace != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::unique_lock lock(mutex);
     if (!retired.empty()) std::swap(retired, reclaim);
     if (profile) lockWaitNs += elapsedNs(lockStart);
+    if (trace != nullptr) trace->Measure("DrawQueue", "mutex", lockStart, std::chrono::steady_clock::now());
     rethrowFailure();
     if (closing) {
         lock.unlock();
@@ -313,6 +315,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
         idle.wait(lock, [&] { return items.size() <= resumeAt; });
         --idleWaiters;
         resumeAt = 0;
+        if (trace != nullptr) trace->Measure("DrawQueue", "full-wait", start, std::chrono::steady_clock::now());
         fullWaitNs += elapsedNs(start);
         rethrowFailure();
     }

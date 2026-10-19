@@ -256,12 +256,17 @@ def digest(trace, summary=None, stacks=None, worst=5, top=10, perf_samples=None)
     count = max(len(frames), 1)
     result = {"summary": summary, "frames": len(frames), "window_ms": span_us / 1000.0}
     result["frame_details"] = frame_details(trace, frames, perf_samples, top)
+    untimed_losses = {name for name, loss in (summary or {}).get("trace_dropped_threads", {}).items()
+                      if loss.get("events_lost", 0) and not any(trace.name(tid) == name for _, tid, _ in trace.slice_losses)}
+    for frame in result["frame_details"]:
+        frame["slice_incomplete_threads"] = sorted(set(frame["slice_incomplete_threads"]) | untimed_losses)
+        frame["slice_data_complete"] = not frame["slice_incomplete_threads"]
     if perf_samples is not None:
         aligned = sum(thread["samples"] for frame in result["frame_details"] for thread in frame["sampled_threads"])
         result["perf_samples"] = {"total": len(perf_samples), "in_process": sum(sample["pid"] in trace.processes for sample in perf_samples),
                                   "aligned": aligned}
         result["perf_warning"] = "No CPU samples overlap this process and capture; check the PID, clock and capture times." if aligned == 0 else None
-    result["slice_data_complete"] = not trace.slice_losses
+    result["slice_data_complete"] = not trace.slice_losses and not untimed_losses
     result["counter_data_complete"] = not trace.counter_losses
     result["counter_losses"] = [{"thread": trace.name(tid), "at_ms": at / 1000.0, "calls_lost": count} for at, tid, count in trace.counter_losses]
     cache_totals = collections.Counter()

@@ -33,7 +33,7 @@ void Driver::addDrawPhases(const std::array<double, DrawDriverPhaseCount>& ms, b
 }
 
 DrawPhaseTiming::~DrawPhaseTiming() {
-    if (trace != nullptr) trace->Measure("Driver.Draw", "total", started, std::chrono::steady_clock::now());
+    if (trace != nullptr && measureTotal) trace->Measure("Driver.Draw", "total", started, std::chrono::steady_clock::now());
 }
 
 void DrawPhaseTiming::Phase(DrawDriverPhase which) {
