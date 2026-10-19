@@ -646,6 +646,7 @@ private:
     std::vector<SamplerSource> samplerSources;
     bool reusable = false;
     bool refreshesPerUse = false;
+    bool refreshedMultisample = false;
     bool addressReuse = false;
     bool reuseProved = false;
     std::shared_ptr<std::atomic<std::uint32_t>> usesInFlight = std::make_shared<std::atomic<std::uint32_t>>(0u);

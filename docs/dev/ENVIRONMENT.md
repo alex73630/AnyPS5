@@ -233,7 +233,6 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_DRAW_RECIPE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | builds no draw recipes, so draw-cache hits repeat the recorded stages |
 | `APS5_NO_DRAW_RELOCATION` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRelocate.cpp` |  | disables draw relocation, which rewrites a draw's moved user words from a learned variant instead of preparing the draw again |
 | `APS5_NO_DRAW_RESOURCE_CACHE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | builds every draw's shader resources instead of reusing a cached identical build |
-| `APS5_NO_REFRESHED_DRAW_REUSE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | refuses draw resource reuse for depth textures that require a lookup and refresh on each use |
 | `APS5_NO_DRAW_SRT_ENTRIES` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | disables the draw cache's SRT entries, so every draw decodes its programs |
 | `APS5_NO_DRAW_STAGE_DATA_HITS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` |  | disables draw-cache hits that differ only in a stage's ShaderData words |
 | `APS5_NO_EMPTY_INDIRECT_SKIP` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp` |  | builds the stages of an indirect draw whose front program last took the CPU path even when none of its records draws anything, instead of reading its records first and skipping it |
@@ -304,6 +303,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_RECORDER_SYNC_DRAWS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | gives the draws the recorder waits for their own batch instead of recording them with the wait |
 | `APS5_NO_RECORD_COPIED_DRAWS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | waits for copied-write draws at once instead of listing their write-back for later |
 | `APS5_NO_RECT_INDIRECT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/IndirectDraw.cpp` |  | sends an indirect rectangle-list draw down the CPU path instead of the GPU-side path |
+| `APS5_NO_REFRESHED_DRAW_REUSE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | refuses draw resource reuse for depth textures that require a lookup and refresh on each use |
 | `APS5_NO_RESIDENT_LINEAR` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | drops the residency of a linear color target whose address already has a host import, so it is copied in and out again |
 | `APS5_NO_RESIDENT_PRESENT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | always presents through guest memory instead of the resident image |
 | `APS5_NO_RESIDENT_TARGETS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | copies every render target in and out again instead of keeping it resident |

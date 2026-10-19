@@ -411,6 +411,11 @@ void ReusedDrawResources(const Context& base, const WatchedBlock& block) {
         readback.Invalidate();
         Require(std::ranges::all_of(readback.Bytes(), [pattern](std::byte value) { return value == std::byte(pattern & 0xffu); }), "reused stencil descriptors copied stale GPU plane contents");
         stencilResources.EndUse();
+        imageToBufferCopies = 0;
+        bufferToImageCopies = 0;
+        Require(stencilResources.Revalidate(stages, &proof), "an unchanged stencil plane failed draw resource revalidation");
+        Require(proof.path == ShaderResources::ProofPath::Full && imageToBufferCopies == 0u && bufferToImageCopies == 0u, "an unchanged stencil plane recorded redundant refresh copies");
+        stencilResources.EndUse();
     }
     ClearDepthSurfaces(context.device);
 }
