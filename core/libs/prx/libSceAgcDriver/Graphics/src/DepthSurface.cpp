@@ -1744,7 +1744,8 @@ void releaseRetired(const Context& context) {
     auto& list = surfaces();
     for (auto it = list.begin(); it != list.end();) {
         const auto& surface = **it;
-        if (!surface.retired || surface.context.device != context.device || surface.target.samples != 1u || surface.SampledElsewhere()) {
+        if (!surface.retired || surface.context.device != context.device || surface.target.samples != 1u || surface.SampledElsewhere() ||
+            std::any_of(layeredDepths().begin(), layeredDepths().end(), [&](const auto& group) { return std::find(group->slices.begin(), group->slices.end(), &surface) != group->slices.end(); })) {
             ++it;
             continue;
         }

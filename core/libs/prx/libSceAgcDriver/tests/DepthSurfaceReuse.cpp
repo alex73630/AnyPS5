@@ -419,6 +419,24 @@ void TestRetiredSurfaceRelease(const Context& context) {
     ClearDepthSurfaces(context.device);
 }
 
+void TestLayeredRetirement(Context context) {
+    ClearDepthSurfaces(context.device);
+    context.limits.maxImageArrayLayers = 8;
+    context.limits.maxFramebufferLayers = 8;
+    DepthTarget target{0xb0000000, 0xb1000000, {256, 256}, VK_FORMAT_D32_SFLOAT_S8_UINT, 1.0f, 0};
+    target.lastSlice = 1;
+    const auto view = DepthSurfaceView(context, target, 2);
+    const auto image = imageViews.at(view).image;
+    const auto bytes = DepthSliceBytes(target.extent, 4u);
+    RetireDepthSurfaces(context.device, target.address + bytes, bytes);
+    const auto released = DepthSurfacesReleased();
+    DepthSurfaceView(context, {0xb2000000, 0, target.extent, VK_FORMAT_D32_SFLOAT, 1.0f, 0});
+    Require(DepthSurfacesReleased() == released, "a retired slice referenced by a layered group must not be released");
+    Require(DepthSurfaceView(context, target, 2) == view, "rebinding a layered group must retain its retired slice");
+    Require(imageViews.at(view).image == image, "rebinding a layered group must preserve its image");
+    ClearDepthSurfaces(context.device);
+}
+
 void RunDepthSurfaceReuseTests() {
     static int deviceTag = 0;
     Context context{};
@@ -579,6 +597,7 @@ void RunDepthSurfaceReuseTests() {
         Require(clearsAfter(2u * sliceHtile) == std::vector<VkImage>{firstImage, secondImage}, "an HTILE clear over both slices must clear both");
     }
     TestRetiredSurfaceRelease(context);
+    TestLayeredRetirement(context);
 
     ClearDepthSurfaces(context.device);
 }
