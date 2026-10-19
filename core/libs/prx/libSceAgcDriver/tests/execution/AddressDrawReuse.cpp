@@ -568,12 +568,11 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     Scene::Store(scene.spare, ValueOffset, Zero);
     const auto spareValue = scene.spare.Address(ValueOffset);
     std::memcpy(scene.spare.Data() + PointerOffset, &spareValue, sizeof(spareValue));
-    const auto run = [&](Pages& root, float expected) {
+    const auto issue = [&](Pages& root) {
         const auto address = root.Address();
         data->guestDescriptor[0] = static_cast<std::uint32_t>(address);
         data->guestDescriptor[1] = static_cast<std::uint32_t>(address >> 32u);
         Require(ShaderResources::ContentKey(scene.shaders[1], false, true) == originalKey, "changing storage shader data changed the draw content key");
-        std::memcpy(root.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
         std::array<GuestMemorySnapshot, 3> snapshots{{scene.snapshots[0], scene.snapshots[1], {address, std::span<const std::byte>(reinterpret_cast<const std::byte*>(root.Data()), sizeof(std::uint64_t))}}};
         std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) { return left.address < right.address; });
         {
@@ -581,10 +580,18 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
             const AgcDriver::Pm4::DrawParameters parameters{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
             scene.device.Draw(scene.state, parameters, scene.shaders, snapshots);
         }
+    };
+    const auto run = [&](Pages& root, float expected) {
+        std::memcpy(scene.guest.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
+        std::memcpy(scene.spare.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
+        issue(root);
         scene.Wait();
         std::uint32_t stored = Sentinel;
         std::memcpy(&stored, root.Data() + StoreOffset, sizeof(stored));
         Require(scene.Color() == (expected == One ? 255 : 0) && stored == Bits(expected), "a moved storage data draw read or wrote through the old root");
+        auto& other = &root == &scene.guest ? scene.spare : scene.guest;
+        std::memcpy(&stored, other.Data() + StoreOffset, sizeof(stored));
+        Require(stored == Sentinel, "a storage data draw also wrote through the unselected root");
     };
     run(scene.guest, One);
     run(scene.guest, One);
@@ -609,6 +616,18 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     run(scene.guest, One);
     const auto afterBuffer = AddressReuseCounters();
     Require(Builds() == built + 1 && Counted(afterBuffer, AddressReuse::Moved) == Counted(beforeBuffer, AddressReuse::Moved) + 1, "a moved guest buffer bypassed the address draw binding restriction");
+    std::memcpy(scene.guest.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
+    std::memcpy(scene.spare.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
+    const auto batchBuilds = Builds();
+    const auto beforeBatch = AddressReuseCounters();
+    issue(scene.spare);
+    issue(scene.guest);
+    scene.Wait();
+    const auto afterBatch = AddressReuseCounters();
+    std::uint32_t spareStored = Sentinel;
+    std::memcpy(&spareStored, scene.spare.Data() + StoreOffset, sizeof(spareStored));
+    Require(scene.Color() == 255 && scene.Stored() == Bits(One) && spareStored == Bits(Zero), "two queued storage roots shared their draw data");
+    Require(Builds() == batchBuilds + 1 && Counted(afterBatch, AddressReuse::InUse) == Counted(beforeBatch, AddressReuse::InUse) + 1, "queued storage roots reused an in-flight BDA fault buffer");
 }
 
 void MovedImageTableSnapshot(AgcDriver::VulkanDevice& device) {

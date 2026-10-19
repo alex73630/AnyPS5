@@ -1720,6 +1720,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             const auto proofStart = addressBased && timer.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             ShaderResources::ProofReport proof;
             const bool valid = cached->Revalidate(shaders, &proof, snapshots);
+            if (valid) resolved.use.resources = cached;
             auto* recorder = Recorder::Active();
             std::optional<std::vector<ShaderResources::MovedBuffer>> moved;
             ShaderResources::MoveProof moveProof;
@@ -1727,7 +1728,6 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             if (valid && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder, &moveProof);
             if (moved.has_value()) {
                 resolved.resources = std::move(cached);
-                resolved.use.resources = resolved.resources;
                 resolved.moved = std::move(*moved);
                 if (trimKey) CheckBufferAliases(context, shaders, state.color, draw.indexAddress, indexBytes);
                 outcome.kind = KindTemplateHit;
@@ -1743,6 +1743,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 if (proof.movedSnapshots) CountMovedSnapshotUse(false);
                 if (addressBased) CountAddressReuse(AddressReuse::Moved, timer.profile ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - proofStart).count()) : 0);
                 cached->EndUse();
+                resolved.use.resources.reset();
                 countCache(&DrawProfile::cacheMisses);
             } else {
                 SharedResourceCache().Remove(resolved.contentKey);
