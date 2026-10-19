@@ -157,11 +157,46 @@ bool PoolFailure(bool updateAfterBind, bool grow) {
     std::printf("pool updateAfterBind=%d grow=%d: unowned=%u\n", updateAfterBind, grow, objects.pools);
     return objects.layouts == 0 && objects.pools == 0;
 }
+bool RewrittenCounts(bool updateAfterBind, bool dedicated) {
+    objects = {};
+    {
+        auto context = TestContext();
+        context.limits.maxDescriptorSetSampledImages = 4096;
+        context.limits.maxPerStageDescriptorSampledImages = 4096;
+        context.limits.maxPerStageResources = 8192;
+        context.descriptorIndexingLimits.maxPerStageDescriptorUpdateAfterBindSampledImages = 4096;
+        context.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindSampledImages = 4096;
+        context.descriptorIndexingLimits.maxPerStageUpdateAfterBindResources = 8192;
+        DescriptorCache cache(context);
+        const std::uint32_t small = dedicated ? 2048 : 2;
+        const std::uint32_t large = dedicated ? 3072 : 7;
+        const VkDescriptorSetLayoutBinding variableBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, large, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        const std::array<std::uint32_t, 4> variableKey{variableBinding.binding, variableBinding.descriptorType, variableBinding.descriptorCount, variableBinding.stageFlags};
+        const VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+        const auto layout = cache.Layout(variableKey, std::span(&variableBinding, 1), updateAfterBind, std::span(&flags, 1));
+        const VkDescriptorPoolSize smallSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, small};
+        const VkDescriptorPoolSize largeSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, large};
+        const auto first = cache.AllocateRewritten(layout, std::span(&smallSize, 1), updateAfterBind, small);
+        cache.Recycle(layout, first);
+        const auto second = cache.AllocateRewritten(layout, std::span(&largeSize, 1), updateAfterBind, large);
+        RequireTest(first.set != second.set, "a larger rewritten set reused a smaller variable descriptor allocation");
+        cache.Recycle(layout, second);
+        const auto againSmall = cache.AllocateRewritten(layout, std::span(&smallSize, 1), updateAfterBind, small);
+        RequireTest(againSmall.set == first.set && againSmall.variableCount == small, "the smaller variable descriptor allocation was not retained");
+        const auto againLarge = cache.AllocateRewritten(layout, std::span(&largeSize, 1), updateAfterBind, large);
+        RequireTest(againLarge.set == second.set && againLarge.variableCount == large, "the larger variable descriptor allocation was not retained");
+        cache.Recycle(layout, againSmall);
+        cache.Recycle(layout, againLarge);
+    }
+    return objects.layouts == 0 && objects.pools == 0;
+}
+
 }
 
 int main() {
     int failures = 0;
     for (const bool updateAfterBind : {false, true}) {
+        for (const bool dedicated : {false, true}) if (!RewrittenCounts(updateAfterBind, dedicated)) ++failures;
         if (!LayoutFailure(updateAfterBind)) ++failures;
         for (const bool grow : {false, true}) if (!PoolFailure(updateAfterBind, grow)) ++failures;
     }
