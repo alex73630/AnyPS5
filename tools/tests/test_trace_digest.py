@@ -66,6 +66,87 @@ class TraceDigestTests(unittest.TestCase):
                     self.assertNotIn("Traceback", result.stderr)
                     self.assertEqual(result.stdout, "")
 
+    def test_frame_cache_counts_are_not_time_and_respect_boundaries(self):
+        events = EVENTS + [
+            {"ph": "C", "cat": "cache", "name": "Resources.miss", "ts": 9999, "tid": 1, "args": {"calls": 3}},
+            {"ph": "C", "cat": "cache", "name": "Resources.hit", "ts": 10000, "tid": 1, "args": {"calls": 7}},
+            {"ph": "C", "cat": "cache", "name": "Resources.miss", "ts": 40000, "tid": 1, "args": {"calls": 100}},
+        ]
+        result = trace_digest.digest(trace_digest.Trace({"traceEvents": events}), SUMMARY)
+        self.assertEqual([sum(call["calls"] for call in frame["cache_calls"]) for frame in result["frame_details"]], [3, 7, 0])
+        self.assertEqual(sum(call["calls"] for call in result["cache_calls"]), 10)
+        worker = next(thread for thread in result["threads"] if thread["thread"] == "queue worker 0x0")
+        self.assertEqual(worker["folded_ms_per_frame"], 0.5)
+
+    def test_nested_phases_partition_time_without_double_counting(self):
+        events = [complete(1, "outer", 0, 10000), complete(1, "inner", 1000, 7000), complete(1, "leaf", 2000, 2000),
+                  {"ph": "i", "name": "present", "ts": 0, "args": {"present": 1}},
+                  {"ph": "i", "name": "present", "ts": 5000, "args": {"present": 2}},
+                  {"ph": "i", "name": "present", "ts": 10000, "args": {"present": 3}}]
+        result = trace_digest.digest(trace_digest.Trace({"traceEvents": events}))
+        first, second = result["frame_details"]
+        self.assertEqual({item["name"]: item["ms"] for item in first["leaf_phases"]}, {"outer": 1, "inner": 2, "leaf": 2})
+        self.assertEqual({item["name"]: item["ms"] for item in second["leaf_phases"]}, {"outer": 2, "inner": 3})
+
+    def test_perf_clock_alignment_filters_other_processes_and_keeps_threads(self):
+        origin = 10000000000
+        trace = trace_digest.Trace({"traceEvents": EVENTS, "steady_clock_origin_ns": origin})
+        samples = [{"pid": pid, "tid": tid, "comm": "app.elf", "at_ns": origin + offset, "stack": ["leaf", "caller"]}
+                   for pid, tid, offset in [(7, 11, 10000000), (7, 12, 29999999), (8, 11, 10000000), (7, 11, 40000000)]]
+        result = trace_digest.digest(trace, SUMMARY, perf_samples=samples)
+        first, second, third = result["frame_details"]
+        self.assertEqual(first["sampled_threads"], [])
+        self.assertEqual(third["sampled_threads"], [])
+        self.assertEqual({entry["tid"] for entry in second["sampled_threads"]}, {11, 12})
+        self.assertTrue(all(entry["self"] == [{"name": "leaf", "samples": 1}] for entry in second["sampled_threads"]))
+        with self.assertRaisesRegex(ValueError, "steady_clock_origin_ns"):
+            trace_digest.digest(trace_digest.Trace(EVENTS), SUMMARY, perf_samples=samples)
+
+    def test_measured_short_phases_use_present_sequence_and_do_not_become_folded_time(self):
+        events = EVENTS + [
+            {"ph": "i", "cat": "phase_time", "name": "Resources.images", "ts": 10001, "tid": 1,
+             "args": {"calls": 1000, "present": 600, "ns": 5000000}},
+            {"ph": "i", "cat": "cache", "name": "Resources.hit", "ts": 10001, "tid": 1,
+             "args": {"calls": 17, "present": 600}},
+        ]
+        result = trace_digest.digest(trace_digest.Trace({"traceEvents": events}), SUMMARY)
+        first, second, _ = result["frame_details"]
+        self.assertEqual(first["measured_phases"], [{"thread": "queue worker 0x0", "name": "Resources.images", "calls": 1000, "ms": 5.0}])
+        self.assertEqual(first["cache_calls"][0]["calls"], 17)
+        self.assertEqual(second["cache_calls"], [])
+        self.assertEqual(second["measured_phases"], [])
+        self.assertTrue(result["counter_data_complete"])
+
+    def test_counter_overflow_marks_affected_and_later_frames(self):
+        events = EVENTS + [{"ph": "i", "name": "cache counters full", "ts": 10000, "tid": 1, "args": {"calls_lost": 12}}]
+        result = trace_digest.digest(trace_digest.Trace({"traceEvents": events}), SUMMARY)
+        self.assertEqual([frame["counter_data_complete"] for frame in result["frame_details"]], [True, False, False])
+        self.assertEqual(result["frame_details"][1]["counter_incomplete_threads"], ["queue worker 0x0"])
+        self.assertFalse(result["counter_data_complete"])
+        self.assertIn("Missing counts must not be interpreted as zero", trace_digest.markdown(result))
+
+    def test_perf_thread_identity_and_zero_alignment_warning(self):
+        events = EVENTS + [{"ph": "M", "name": "thread_name", "tid": 1, "args": {"name": "queue worker 0x0", "os_tid": 11}}]
+        trace = trace_digest.Trace({"traceEvents": events, "steady_clock_origin_ns": 10000000000})
+        sample = {"pid": 7, "tid": 11, "comm": "app.elf", "at_ns": 10001000000, "stack": ["function"]}
+        result = trace_digest.digest(trace, SUMMARY, perf_samples=[sample])
+        self.assertEqual(result["frame_details"][0]["sampled_threads"][0]["thread"], "queue worker 0x0")
+        self.assertEqual(result["perf_samples"], {"total": 1, "in_process": 1, "aligned": 1})
+        sample["at_ns"] = 0
+        result = trace_digest.digest(trace, SUMMARY, perf_samples=[sample])
+        self.assertEqual(result["perf_samples"]["aligned"], 0)
+        self.assertIn("No CPU samples overlap", trace_digest.markdown(result))
+
+    def test_perf_script_parser(self):
+        path = Path(self.directory.name) / "perf.txt"
+        path.write_text("app.elf 7/11 10.010000001: cpu-clock:u: \n\t 123 function(int) (/tmp/libAGC.prx)\n\t 456 caller (/tmp/app.elf)\n\n", encoding="utf-8")
+        samples = trace_digest.load_perf_script(path)
+        self.assertEqual(samples[0]["at_ns"], 10010000001)
+        self.assertEqual(samples[0]["stack"], ["function(int) [libAGC.prx]", "caller [app.elf]"])
+        path.write_text("broken record\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "expected perf script"):
+            trace_digest.load_perf_script(path)
+
     def test_cli_reports_unreadable_inputs_without_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

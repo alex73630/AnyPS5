@@ -2,8 +2,10 @@ import argparse
 import bisect
 import collections
 import gzip
+import heapq
 import html
 import json
+import re
 import sys
 import zlib
 from pathlib import Path
@@ -33,6 +35,12 @@ class Trace:
         self.presents = []
         self.folded = collections.defaultdict(float)
         self.batched = []
+        self.counters = []
+        self.measurements = []
+        self.counter_losses = []
+        self.os_threads = {}
+        self.origin_ns = document.get("steady_clock_origin_ns") if isinstance(document, dict) else None
+        self.processes = set()
         if not isinstance(document, (list, dict)):
             raise ValueError("trace must be an event array or object")
         events = document if isinstance(document, list) else document.get("traceEvents", [])
@@ -41,9 +49,13 @@ class Trace:
         for index, event in enumerate(events):
             if not isinstance(event, dict):
                 raise ValueError(f"trace event {index} must be an object")
+            if "pid" in event:
+                self.processes.add(event["pid"])
             phase = event.get("ph")
             if phase == "M" and event.get("name") == "thread_name":
                 self.threads[event["tid"]] = event["args"]["name"]
+                if event["args"].get("os_tid"):
+                    self.os_threads[event["args"]["os_tid"]] = event["args"]["name"]
             elif phase == "X":
                 self.slices[event["tid"]].append([float(event["ts"]), float(event["dur"]), event["name"], 0, False])
                 batch = event.get("args", {}).get("batch")
@@ -51,6 +63,12 @@ class Trace:
                     self.batched.append((event["tid"], float(event["ts"]), float(event["dur"]), event["name"], batch))
             elif phase == "i" and event.get("name") == "present":
                 self.presents.append((float(event["ts"]), event.get("args", {}).get("present")))
+            elif phase in ("C", "i") and event.get("cat") in ("cache", "phase_time"):
+                args = event["args"]
+                target = self.measurements if event["cat"] == "phase_time" else self.counters
+                target.append((float(event["ts"]), event["tid"], event["name"], int(args["calls"]), args.get("present"), args.get("ns", 0)))
+            elif phase == "i" and event.get("name") == "cache counters full":
+                self.counter_losses.append((float(event["ts"]), event["tid"], event["args"]["calls_lost"]))
             elif phase == "C":
                 self.folded[event["tid"]] += sum(float(value) for value in event.get("args", {}).values())
         self.presents.sort()
@@ -123,12 +141,129 @@ def load_stacks(path):
     return stacks
 
 
-def digest(trace, summary=None, stacks=None, worst=5, top=10):
+def load_perf_script(path):
+    header = re.compile(r"^(.*?)\s+(\d+)/(\d+)\s+(\d+)\.(\d+):\s+([^:]+(?::[^:]+)?):\s*$")
+    frame = re.compile(r"^\s+([0-9a-fA-F]+)\s+(.+)\s+\((.*)\)\s*$")
+    samples = []
+    current = None
+    for number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = header.match(line)
+        if match:
+            comm, pid, tid, seconds, fraction, event = match.groups()
+            if not event.startswith("cpu-clock"):
+                raise ValueError(f"{path}:{number}: expected cpu-clock samples")
+            current = {"comm": comm.strip(), "pid": int(pid), "tid": int(tid),
+                       "at_ns": int(seconds) * 1000000000 + int(fraction.ljust(9, "0")[:9]), "stack": []}
+            samples.append(current)
+            continue
+        match = frame.match(line)
+        if current is None or match is None:
+            raise ValueError(f"{path}:{number}: expected perf script --ns -F comm,pid,tid,time,event,ip,sym,dso")
+        address, symbol, module = match.groups()
+        name = f"{symbol.strip()} [{Path(module).name}]"
+        current["stack"].append(name)
+    return samples
+
+
+def leaf_segments(slices):
+    edges = []
+    for index, (start, duration, *_) in enumerate(slices):
+        if duration <= 0:
+            continue
+        edges.append((start, 1, index))
+        edges.append((start + duration, 0, index))
+    active = set()
+    heap = []
+    previous = None
+    for at, entering, index in sorted(edges):
+        while heap and heap[0][2] not in active:
+            heapq.heappop(heap)
+        if previous is not None and at > previous and heap:
+            yield previous, at, slices[heap[0][2]][2]
+        if entering:
+            active.add(index)
+            heapq.heappush(heap, (-slices[index][0], slices[index][1], index))
+        else:
+            active.discard(index)
+        previous = at
+
+
+def frame_details(trace, frames, perf_samples, top):
+    starts = [frame[1] for frame in frames]
+    phases = [collections.Counter() for _ in frames]
+    counters = [collections.Counter() for _ in frames]
+    measured = [collections.defaultdict(lambda: [0, 0]) for _ in frames]
+    present_indices = {frame[3]: frame[0] for frame in frames}
+    samples = [collections.defaultdict(list) for _ in frames]
+    for tid, slices in trace.slices.items():
+        for begin, end, name in leaf_segments(slices):
+            index = max(bisect.bisect_right(starts, begin) - 1, 0)
+            while index < len(frames) and frames[index][1] < end:
+                overlap = min(end, frames[index][2]) - max(begin, frames[index][1])
+                if overlap > 0:
+                    phases[index][(trace.name(tid), name)] += overlap / 1000.0
+                index += 1
+    for records, timed in ((trace.counters, False), (trace.measurements, True)):
+        for at, tid, name, count, present, ns in records:
+            index = present_indices.get(present, -1) if present is not None else bisect.bisect_right(starts, at) - 1
+            if 0 <= index < len(frames) and (present is not None or at < frames[index][2]):
+                key = (trace.name(tid), name)
+                if timed:
+                    measured[index][key][0] += count
+                    measured[index][key][1] += ns
+                else:
+                    counters[index][key] += count
+    if perf_samples is not None and trace.origin_ns is None:
+        raise ValueError("perf alignment requires steady_clock_origin_ns in the trace")
+    for sample in perf_samples or []:
+        if sample["pid"] not in trace.processes:
+            continue
+        at = (sample["at_ns"] - trace.origin_ns) / 1000.0
+        index = bisect.bisect_right(starts, at) - 1
+        if 0 <= index < len(frames) and at < frames[index][2]:
+            samples[index][(sample["tid"], sample["comm"])].append(sample["stack"])
+    result = []
+    for index, begin, end, present in frames:
+        sampled = []
+        for (tid, comm), stacks in samples[index].items():
+            own = collections.Counter(stack[0] for stack in stacks if stack)
+            callers = collections.Counter(name for stack in stacks for name in set(stack))
+            sampled.append({"tid": tid, "comm": comm, "thread": trace.os_threads.get(tid), "samples": len(stacks),
+                            "self": [{"name": name, "samples": count} for name, count in own.most_common(top)],
+                            "inclusive": [{"name": name, "samples": count} for name, count in callers.most_common(top)]})
+        result.append({"present": present, "at_ms": begin / 1000.0, "ms": (end - begin) / 1000.0,
+                       "leaf_phases": [{"thread": thread, "name": name, "ms": ms} for (thread, name), ms in phases[index].most_common()],
+                       "cache_calls": [{"thread": thread, "name": name, "calls": count} for (thread, name), count in counters[index].most_common()],
+                       "measured_phases": [{"thread": thread, "name": name, "calls": values[0], "ms": values[1] / 1000000.0}
+                                           for (thread, name), values in sorted(measured[index].items(), key=lambda item: -item[1][1])],
+                       "counter_data_complete": not any(at < end for at, _, _ in trace.counter_losses),
+                       "counter_incomplete_threads": sorted({trace.name(tid) for at, tid, _ in trace.counter_losses if at < end}),
+                       "sampled_threads": sampled})
+    return result
+
+
+def digest(trace, summary=None, stacks=None, worst=5, top=10, perf_samples=None):
     window_ms = summary["window"]["ms"] if summary else None
     frames = trace.frames(window_ms * 1000.0 if window_ms is not None else None)
     span_us = frames[-1][2] - frames[0][1] if frames else 0.0
     count = max(len(frames), 1)
     result = {"summary": summary, "frames": len(frames), "window_ms": span_us / 1000.0}
+    result["frame_details"] = frame_details(trace, frames, perf_samples, top)
+    if perf_samples is not None:
+        aligned = sum(thread["samples"] for frame in result["frame_details"] for thread in frame["sampled_threads"])
+        result["perf_samples"] = {"total": len(perf_samples), "in_process": sum(sample["pid"] in trace.processes for sample in perf_samples),
+                                  "aligned": aligned}
+        result["perf_warning"] = "No CPU samples overlap this process and capture; check the PID, clock and capture times." if aligned == 0 else None
+    result["counter_data_complete"] = not trace.counter_losses
+    result["counter_losses"] = [{"thread": trace.name(tid), "at_ms": at / 1000.0, "calls_lost": count} for at, tid, count in trace.counter_losses]
+    cache_totals = collections.Counter()
+    for frame in result["frame_details"]:
+        for counter in frame["cache_calls"]:
+            cache_totals[(counter["thread"], counter["name"])] += counter["calls"]
+    result["cache_calls"] = [{"thread": thread, "name": name, "calls": value, "per_frame": value / count}
+                             for (thread, name), value in cache_totals.most_common()]
 
     slowest = []
     for index, begin, end, present in sorted(frames, key=lambda frame: frame[1] - frame[2])[:worst]:
@@ -244,11 +379,38 @@ def markdown(result):
     else:
         lines.append(f"{result['frames']} frames over {result['window_ms']:.1f} ms (no summary line found)")
     lines.append("")
+    if not result.get("counter_data_complete", True):
+        lines.extend(["Counter data is incomplete. Missing counts must not be interpreted as zero calls.", ""])
+    if "perf_samples" in result:
+        counts = result["perf_samples"]
+        lines.extend([f"CPU samples: {counts['aligned']} aligned, {counts['in_process']} from this process, {counts['total']} total.", ""])
+        if result.get("perf_warning"):
+            lines.extend([result["perf_warning"], ""])
     lines.append("**Slowest frames** (largest slices inside each, inclusive)")
     lines.append("")
     for frame in result["slowest_frames"]:
         parts = ", ".join(f"{entry['name']} ({entry['thread']}) {entry['ms']:.1f}" for entry in frame["slices"])
         lines.append(f"- present {frame['present']}: {frame['ms']:.1f} ms at {frame['at_ms']:.0f} ms: {parts}")
+    lines.extend(["", "**Slowest frames: exclusive instrumented phases and sampled functions**", "",
+                  "Leaf times partition recorded slices; scopes below 20 us remain charged to their parent. Measured phase totals include short calls, can nest, and are attributed to the present when they finish. Threads overlap; their times are not additive frame latency. CPU samples estimate hot functions, not exact call durations.", ""])
+    for frame in sorted(result["frame_details"], key=lambda item: -item["ms"])[:len(result["slowest_frames"])]:
+        active = [entry for entry in frame["leaf_phases"] if not is_wait(entry["name"])]
+        phases = ", ".join(f"{entry['name']} ({entry['thread']}) {entry['ms']:.1f} ms" for entry in active[:5])
+        lines.append(f"- present {frame['present']}: {phases}")
+        if not frame.get("counter_data_complete", True):
+            lines.append("  - incomplete counters: " + ", ".join(frame["counter_incomplete_threads"]))
+        for entry in frame.get("measured_phases", [])[:5]:
+            lines.append(f"  - measured {entry['name']} ({entry['thread']}): {entry['ms']:.2f} ms across {entry['calls']} calls")
+        for thread in frame["sampled_threads"]:
+            hottest = ", ".join(f"{entry['name']} {entry['samples']} samples" for entry in thread["self"][:3])
+            lines.append(f"  - {thread.get('thread') or thread['comm']} tid {thread['tid']}, {thread['samples']} CPU samples: {hottest}")
+        if frame["cache_calls"]:
+            calls = ", ".join(f"{entry['name']}={entry['calls']}" for entry in frame["cache_calls"][:8])
+            lines.append(f"  - cache calls: {calls}")
+    if result["cache_calls"]:
+        lines.extend(["", "**Cache outcomes during the captured window**", "", "| thread | outcome | calls | per present |", "|---|---|---:|---:|"])
+        for entry in result["cache_calls"]:
+            lines.append(f"| {table_cell(entry['thread'])} | {table_cell(entry['name'])} | {entry['calls']} | {entry['per_frame']:.1f} |")
     lines.append("")
     lines.append("**Threads** (ms per frame)")
     lines.append("")
@@ -353,6 +515,7 @@ def main(arguments=None):
     parser.add_argument("--stacks", help="collapsed-stack file of APS5_SAMPLE_WORKER (<file stem>.collapsed.txt)")
     parser.add_argument("--thread", action="append", default=[], metavar="NAME",
                         help="include event tracks with this exact thread name; repeat to select several tracks")
+    parser.add_argument("--perf-script", help="Linux cpu-clock perf script --ns -F comm,pid,tid,time,event,ip,sym,dso from a recording made with --clockid mono")
     parser.add_argument("--frames", type=nonnegative_integer, default=5, help="slowest frames to list (default 5)")
     parser.add_argument("--top", type=nonnegative_integer, default=10, help="entries per list (default 10)")
     parser.add_argument("--json", action="store_true", help="print the digest as JSON")
@@ -367,13 +530,14 @@ def main(arguments=None):
         return 0
     try:
         stacks = load_stacks(options.stacks) if options.stacks else None
+        perf_samples = load_perf_script(options.perf_script) if options.perf_script else None
     except (OSError, ValueError) as error:
         parser.error(str(error))
     trace = load_trace(options.trace)
     if options.thread:
         trace.select_threads(options.thread)
     result = digest(trace, load_summary(options.summary, options.trace),
-                    stacks, options.frames, options.top)
+                    stacks, options.frames, options.top, perf_samples)
     if options.thread:
         result["thread_filter"] = sorted(set(options.thread))
     sys.stdout.write(json.dumps(result, indent=1) + "\n" if options.json else markdown(result))
