@@ -250,7 +250,7 @@ struct Scene {
     std::array<AgcDriver::Graphics::GuestMemorySnapshot, 2> snapshots{};
     AgcDriver::Graphics::State state{};
 
-    Scene(AgcDriver::VulkanDevice& device, std::size_t ranges, std::uint32_t vertexRecords = static_cast<std::uint32_t>(BlockBytes / 16u)) : device(device), extra(std::max<std::size_t>(ranges, 1) * 2 * PageBytes), ranges(ranges) {
+    Scene(AgcDriver::VulkanDevice& device, std::size_t ranges, std::uint32_t vertexRecords = static_cast<std::uint32_t>(BlockBytes / 16u), bool storageData = false) : device(device), extra(std::max<std::size_t>(ranges, 1) * 2 * PageBytes), ranges(ranges) {
         pixels.Register(0, TargetLayout.Bytes(), true);
         std::memcpy(vertices.Data(), Triangle.data(), sizeof(Triangle));
         vertices.Register(0, BlockBytes, false);
@@ -287,6 +287,7 @@ struct Scene {
             PixelPushLayout(vertexPush, target)
         };
         fragment.useCache = false;
+        if (storageData) fragment.layout.pushConstantSizeBytes = 0;
         pixelResult = ShaderRecompiler::Recompile(fragment);
         Require(std::any_of(pixelResult.bindings.begin(), pixelResult.bindings.end(), [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; }), "address draw reuse: the pixel shader does not reach guest memory through the BDA table");
         shaders = {{{ShaderStage::Vertex, &vertexResult, 0}, {ShaderStage::Fragment, &pixelResult, PixelPushOffset(vertexPush, target)}}};
@@ -550,6 +551,64 @@ void MovedLiveSnapshot(AgcDriver::VulkanDevice& device) {
     Require(scene.Color() == 0 && scene.Stored() == Bits(Zero), "a draw after a GPU write over its moved capture read stale data");
     after = AddressReuseCounters();
     Require(Builds() == built + 1 && Counted(after, AddressReuse::Snapshots) == Counted(before, AddressReuse::Snapshots) + 1 && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused), "a pending GPU write over a moved capture did not invalidate reuse");
+}
+
+void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    Scene scene(device, 0, static_cast<std::uint32_t>(BlockBytes / 16u), true);
+    scene.spare.Register(0, BlockBytes, true);
+    Pages movedVertices{BlockBytes};
+    std::memcpy(movedVertices.Data(), Triangle.data(), sizeof(Triangle));
+    movedVertices.Register(0, BlockBytes, false);
+    auto data = std::find_if(scene.pixelResult.bindings.begin(), scene.pixelResult.bindings.end(), [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::ShaderData; });
+    Require(data != scene.pixelResult.bindings.end() && data->guestDescriptor.size() >= 2, "the moved data test requires storage shader data");
+    const auto originalWords = data->guestDescriptor;
+    Require(originalWords[0] == static_cast<std::uint32_t>(scene.guest.Address()) && originalWords[1] == static_cast<std::uint32_t>(scene.guest.Address() >> 32u), "the storage root is not in the expected shader data words");
+    const auto originalKey = ShaderResources::ContentKey(scene.shaders[1], false, true);
+    Scene::Store(scene.spare, ValueOffset, Zero);
+    const auto spareValue = scene.spare.Address(ValueOffset);
+    std::memcpy(scene.spare.Data() + PointerOffset, &spareValue, sizeof(spareValue));
+    const auto run = [&](Pages& root, float expected) {
+        const auto address = root.Address();
+        data->guestDescriptor[0] = static_cast<std::uint32_t>(address);
+        data->guestDescriptor[1] = static_cast<std::uint32_t>(address >> 32u);
+        Require(ShaderResources::ContentKey(scene.shaders[1], false, true) == originalKey, "changing storage shader data changed the draw content key");
+        std::memcpy(root.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
+        std::array<GuestMemorySnapshot, 3> snapshots{{scene.snapshots[0], scene.snapshots[1], {address, std::span<const std::byte>(reinterpret_cast<const std::byte*>(root.Data()), sizeof(std::uint64_t))}}};
+        std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) { return left.address < right.address; });
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            const AgcDriver::Pm4::DrawParameters parameters{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+            scene.device.Draw(scene.state, parameters, scene.shaders, snapshots);
+        }
+        scene.Wait();
+        std::uint32_t stored = Sentinel;
+        std::memcpy(&stored, root.Data() + StoreOffset, sizeof(stored));
+        Require(scene.Color() == (expected == One ? 255 : 0) && stored == Bits(expected), "a moved storage data draw read or wrote through the old root");
+    };
+    run(scene.guest, One);
+    run(scene.guest, One);
+    const auto built = Builds();
+    const auto before = AddressReuseCounters();
+    run(scene.spare, Zero);
+    const auto after = AddressReuseCounters();
+    Require(Builds() == built && after.movedSnapshotReused == before.movedSnapshotReused + 1 && after.movedSnapshotBuffersRefused == before.movedSnapshotBuffersRefused, "a changed storage root rebuilt an otherwise reusable address draw");
+    run(scene.guest, One);
+    Require(Builds() == built && data->guestDescriptor == originalWords, "returning to the original storage words rebuilt the resources");
+    for (int index = 0; index < 10; ++index) {
+        run(scene.spare, Zero);
+        run(scene.guest, One);
+    }
+    Require(Builds() == built, "alternating storage roots rebuilt address draw resources");
+    auto vertex = std::find_if(scene.vertexResult.bindings.begin(), scene.vertexResult.bindings.end(), [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers; });
+    Require(vertex != scene.vertexResult.bindings.end() && vertex->guestDescriptor.size() == 4, "the moved buffer test requires one vertex buffer descriptor");
+    const auto vertexAddress = movedVertices.Address();
+    vertex->guestDescriptor[0] = static_cast<std::uint32_t>(vertexAddress);
+    vertex->guestDescriptor[1] = (vertex->guestDescriptor[1] & 0xffff0000u) | static_cast<std::uint32_t>((vertexAddress >> 32u) & 0xffffu);
+    const auto beforeBuffer = AddressReuseCounters();
+    run(scene.guest, One);
+    const auto afterBuffer = AddressReuseCounters();
+    Require(Builds() == built + 1 && Counted(afterBuffer, AddressReuse::Moved) == Counted(beforeBuffer, AddressReuse::Moved) + 1, "a moved guest buffer bypassed the address draw binding restriction");
 }
 
 void MovedImageTableSnapshot(AgcDriver::VulkanDevice& device) {
@@ -877,6 +936,7 @@ int main(int argc, char** argv) {
                 scene.Wait();
             }
             MovedLiveSnapshot(*device);
+            MovedLiveShaderData(*device);
             MovedImageTableSnapshot(*device);
             OversizedVertexBuffer(*device);
             ThrowingProof(*device);

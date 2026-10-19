@@ -5607,6 +5607,7 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 if (same) continue;
                 if (item.dataWords.empty() && patched) return std::nullopt;
                 if (moved.empty()) moved.reserve(allocations.size());
+                if (usesBda && binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(shader, binding.guestDescriptor);
                 moved.push_back({index, 0, item.size, binding.guestDescriptor});
                 continue;
             }
@@ -5637,7 +5638,7 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
             }
         }
     }
-    if (usesBda && !moved.empty()) return std::nullopt;
+    if (usesBda && !moved.empty() && (!addressReuse || std::any_of(moved.begin(), moved.end(), [](const MovedBuffer& entry) { return entry.words.empty(); }))) return std::nullopt;
     return moved;
 }
 
@@ -5714,7 +5715,12 @@ std::size_t ShaderResources::DrawUploadLimit() {
 }
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly) const {
-    if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || usesBda) return {};
+    if (_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) return {};
+    if (usesBda) {
+        if (!addressReuse || moved.empty()) return {};
+        Require(std::all_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation < allocations.size() && !entry.words.empty() && !allocations[entry.allocation].guest && DataRole(allocations[entry.allocation].role); }), "address draw bindings can replace only shader data words");
+        movedOnly = true;
+    }
     thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>>* readsSlot = nullptr;
     auto& reads = ShaderRecompiler::ThreadOwned(readsSlot);
     guestMemory.InPlaceReads(reads);
