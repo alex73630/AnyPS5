@@ -783,13 +783,13 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     }
     if (reuseCount(AddressReuse::Snapshots) != 0) {
         const auto snapshotMiss = [&](SnapshotReuseMiss kind) { return static_cast<unsigned long long>(reuse.snapshotMisses[static_cast<std::size_t>(kind)] - reuseSeen.snapshotMisses[static_cast<std::size_t>(kind)]); };
-        const auto liveAddress = snapshotMiss(SnapshotReuseMiss::LiveAddress);
-        const auto copiedAddress = snapshotMiss(SnapshotReuseMiss::CopiedAddress);
-        std::fprintf(stderr, "[rescache] address snapshot refusals: count %llu, address %llu (old live %llu, old copied %llu), size %llu, live bytes %llu, backing %llu, copied bytes %llu\n", snapshotMiss(SnapshotReuseMiss::Length), liveAddress + copiedAddress, liveAddress, copiedAddress, snapshotMiss(SnapshotReuseMiss::Size), snapshotMiss(SnapshotReuseMiss::LiveBytes), snapshotMiss(SnapshotReuseMiss::Backing), snapshotMiss(SnapshotReuseMiss::CopiedBytes));
+        const auto liveAddress = snapshotMiss(SnapshotReuseMiss::UnsortedLive);
+        const auto copiedAddress = snapshotMiss(SnapshotReuseMiss::UnsortedCopied);
+        std::fprintf(stderr, "[rescache] address snapshot refusals: count %llu, unsorted %llu (first mismatch old live %llu, old copied %llu), size %llu, live bytes %llu, backing %llu, copied bytes %llu\n", snapshotMiss(SnapshotReuseMiss::Length), liveAddress + copiedAddress, liveAddress, copiedAddress, snapshotMiss(SnapshotReuseMiss::Size), snapshotMiss(SnapshotReuseMiss::LiveBytes), snapshotMiss(SnapshotReuseMiss::Backing), snapshotMiss(SnapshotReuseMiss::CopiedBytes));
     }
-    if (reuse.movedSnapshotProofs != reuseSeen.movedSnapshotProofs || reuseCount(AddressReuse::Snapshots) != 0) {
+    if (reuse.movedSnapshotCandidates != reuseSeen.movedSnapshotCandidates || reuseCount(AddressReuse::Snapshots) != 0) {
         const auto missed = [&](SnapshotReuseMiss kind) { return static_cast<unsigned long long>(reuse.snapshotMisses[static_cast<std::size_t>(kind)] - reuseSeen.snapshotMisses[static_cast<std::size_t>(kind)]); };
-        std::fprintf(stderr, "[rescache] moved snapshot proofs: %llu accepted before buffer-move check; refused: copied captures %llu, outside live space %llu, image tables %llu\n", static_cast<unsigned long long>(reuse.movedSnapshotProofs - reuseSeen.movedSnapshotProofs), missed(SnapshotReuseMiss::MovedCopied), missed(SnapshotReuseMiss::MovedOutside), missed(SnapshotReuseMiss::MovedTables));
+        std::fprintf(stderr, "[rescache] moved snapshots: %llu candidates, %llu proofs passed, %llu draws reused, %llu refused by buffer-move check; snapshot refusals: copied captures %llu, outside live space %llu, image or sampler tables %llu\n", static_cast<unsigned long long>(reuse.movedSnapshotCandidates - reuseSeen.movedSnapshotCandidates), static_cast<unsigned long long>(reuse.movedSnapshotProofs - reuseSeen.movedSnapshotProofs), static_cast<unsigned long long>(reuse.movedSnapshotReused - reuseSeen.movedSnapshotReused), static_cast<unsigned long long>(reuse.movedSnapshotBuffersRefused - reuseSeen.movedSnapshotBuffersRefused), missed(SnapshotReuseMiss::MovedCopied), missed(SnapshotReuseMiss::MovedOutside), missed(SnapshotReuseMiss::MovedTables));
     }
     profile.reuseSeen = reuse;
     profile.leaseSeen = leases;
@@ -1709,7 +1709,8 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
         if (cached != nullptr && !inUse) {
             const bool addressBased = cached->ReusesAddressSpace();
             const auto proofStart = addressBased && timer.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            const bool valid = cached->Revalidate(shaders, nullptr, snapshots);
+            ShaderResources::ProofReport proof;
+            const bool valid = cached->Revalidate(shaders, &proof, snapshots);
             auto* recorder = Recorder::Active();
             std::optional<std::vector<ShaderResources::MovedBuffer>> moved;
             if (valid && recorder != nullptr) moved = cached->MovedReadOnlyBuffers(shaders, *recorder);
@@ -1721,7 +1722,9 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 outcome.kind = KindTemplateHit;
                 countCache(&DrawProfile::cacheHits);
                 if (addressBased) CountAddressReuse(AddressReuse::Reused);
+                if (proof.movedSnapshots) CountMovedSnapshotUse(true);
             } else if (valid) {
+                if (proof.movedSnapshots) CountMovedSnapshotUse(false);
                 if (addressBased) CountAddressReuse(AddressReuse::Moved, timer.profile ? static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - proofStart).count()) : 0);
                 cached->EndUse();
                 countCache(&DrawProfile::cacheMisses);

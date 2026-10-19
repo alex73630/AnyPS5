@@ -305,6 +305,7 @@ public:
     struct ProofReport {
         ProofPath path = ProofPath::Fast;
         ProofFailure failure = ProofFailure::None;
+        bool movedSnapshots = false;
     };
     bool Revalidate(std::span<const CompiledShader> shaders, ProofReport* report = nullptr, std::span<const GuestMemorySnapshot> snapshots = {});
     static bool EpochProofs();

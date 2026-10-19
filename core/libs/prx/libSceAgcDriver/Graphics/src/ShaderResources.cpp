@@ -3520,6 +3520,7 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
     CompleteSnapshotWrites(snapshots);
     const auto snapshotMatch = guestMemory.MatchSnapshots(snapshots);
     if (snapshotMatch == SnapshotMatch::Refused) return refuse(AddressReuse::Snapshots);
+    if (snapshotMatch == SnapshotMatch::Moved) CountMovedSnapshotCandidate();
     if (snapshotMatch == SnapshotMatch::Moved && !tableStages.empty()) {
         CountSnapshotReuseMiss(SnapshotReuseMiss::MovedTables);
         return refuse(AddressReuse::Snapshots);
@@ -3544,7 +3545,8 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
         return refuse(AddressReuse::Threw);
     }
     suspend.armed = false;
-    if (snapshotMatch == SnapshotMatch::Moved) CountMovedSnapshotProof();
+    outcome.movedSnapshots = snapshotMatch == SnapshotMatch::Moved;
+    if (outcome.movedSnapshots) CountMovedSnapshotProof();
     reuseProved = true;
     return true;
 }
