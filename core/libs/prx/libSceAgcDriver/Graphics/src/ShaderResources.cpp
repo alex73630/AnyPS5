@@ -3518,7 +3518,12 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
     if (!reusable) return refuse(AddressReuse::NotReusable);
     if (InUse()) return refuse(AddressReuse::InUse);
     CompleteSnapshotWrites(snapshots);
-    if (!guestMemory.SameSnapshots(snapshots)) return refuse(AddressReuse::Snapshots);
+    const auto snapshotMatch = guestMemory.MatchSnapshots(snapshots);
+    if (snapshotMatch == SnapshotMatch::Refused) return refuse(AddressReuse::Snapshots);
+    if (snapshotMatch == SnapshotMatch::Moved && !tableStages.empty()) {
+        CountSnapshotReuseMiss(SnapshotReuseMiss::MovedTables);
+        return refuse(AddressReuse::Snapshots);
+    }
     struct Suspend {
         GuestBufferMemory& memory;
         bool armed = true;
@@ -3528,6 +3533,7 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
     } suspend{guestMemory};
     try {
         if (!guestMemory.ResumeSpace()) return refuse(AddressReuse::Space);
+        if (snapshotMatch == SnapshotMatch::Moved && !guestMemory.MovedSnapshotsLive(snapshots)) return refuse(AddressReuse::Snapshots);
         if (!proveBuild(shaders, &outcome)) return refuse(outcome.failure == ProofFailure::Imports ? AddressReuse::Imports : AddressReuse::Proof);
         if (!guestMemory.SpaceImportsCurrent()) {
             outcome.failure = ProofFailure::Imports;
@@ -3538,6 +3544,7 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
         return refuse(AddressReuse::Threw);
     }
     suspend.armed = false;
+    if (snapshotMatch == SnapshotMatch::Moved) CountMovedSnapshotProof();
     reuseProved = true;
     return true;
 }

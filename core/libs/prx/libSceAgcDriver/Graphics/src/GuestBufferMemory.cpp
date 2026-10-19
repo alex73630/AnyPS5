@@ -161,6 +161,7 @@ AddressSpaceCache& Spaces() {
 
 struct AddressReuseCounts {
     std::atomic<std::uint64_t> proofs{0};
+    std::atomic<std::uint64_t> movedSnapshotProofs{0};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(AddressReuse::Count)> outcomes{};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SpaceResumeMiss::Count)> resumeMisses{};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SnapshotReuseMiss::Count)> snapshotMisses{};
@@ -3297,6 +3298,15 @@ AddressSpaceStats AddressSpaceCounters() {
     return {addressSpaceCacheEnabled(), load(cache.hits), load(cache.rebuiltFirst), load(cache.rebuiltGeneration), load(cache.rebuiltEpoch), load(cache.rebuiltDevice), load(cache.rebuiltWaiterDrop), load(cache.unpublished), load(cache.dissolvedOverlap), load(cache.dissolvedImports), load(cache.waiterDrops)};
 }
 
+void CountMovedSnapshotProof() {
+    ReuseCounts().movedSnapshotProofs.fetch_add(1, std::memory_order_relaxed);
+}
+
+void CountSnapshotReuseMiss(SnapshotReuseMiss reason) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (profile) ReuseCounts().snapshotMisses[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
+}
+
 void CountAddressReuseProof() {
     ReuseCounts().proofs.fetch_add(1, std::memory_order_relaxed);
 }
@@ -3318,6 +3328,7 @@ AddressReuseStats AddressReuseCounters() {
     const auto load = [](const std::atomic<std::uint64_t>& counter) { return counter.load(std::memory_order_relaxed); };
     AddressReuseStats stats;
     stats.proofs = load(counts.proofs);
+    stats.movedSnapshotProofs = load(counts.movedSnapshotProofs);
     for (std::size_t index = 0; index < stats.outcomes.size(); ++index) stats.outcomes[index] = load(counts.outcomes[index]);
     for (std::size_t index = 0; index < stats.resumeMisses.size(); ++index) stats.resumeMisses[index] = load(counts.resumeMisses[index]);
     for (std::size_t index = 0; index < stats.snapshotMisses.size(); ++index) stats.snapshotMisses[index] = load(counts.snapshotMisses[index]);
@@ -5990,31 +6001,80 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferMemory::DirectWr
     return result;
 }
 
-bool GuestBufferMemory::SameSnapshots(std::span<const GuestMemorySnapshot> snapshots) const {
-    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+bool GuestBufferMemory::copiedSnapshotMatches(const GuestMemorySnapshot& snapshot) const {
     const auto miss = [](SnapshotReuseMiss reason) {
-        if (profile) ReuseCounts().snapshotMisses[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
+        CountSnapshotReuseMiss(reason);
         return false;
     };
+    const auto found = std::upper_bound(regions.begin(), regions.end(), snapshot.address, [](std::uint64_t value, const Region& region) { return value < region.begin; });
+    if (found == regions.begin()) return miss(SnapshotReuseMiss::Backing);
+    const auto& region = *std::prev(found);
+    if (region.buffer == nullptr || region.direct != nullptr || region.mirror != nullptr || snapshot.address > region.end || snapshot.bytes.size() > region.end - snapshot.address) return miss(SnapshotReuseMiss::Backing);
+    const auto bytes = region.buffer->Bytes();
+    const auto offset = static_cast<std::size_t>(snapshot.address - region.begin);
+    if (offset > bytes.size() || snapshot.bytes.size() > bytes.size() - offset) return miss(SnapshotReuseMiss::Backing);
+    if (std::memcmp(bytes.data() + offset, snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::CopiedBytes);
+    return true;
+}
+
+SnapshotMatch GuestBufferMemory::MatchSnapshots(std::span<const GuestMemorySnapshot> snapshots) const {
+    const auto miss = [](SnapshotReuseMiss reason) {
+        CountSnapshotReuseMiss(reason);
+        return SnapshotMatch::Refused;
+    };
     if (snapshots.size() != snapshotUses.size()) return miss(SnapshotReuseMiss::Length);
-    for (std::size_t index = 0; index < snapshots.size(); ++index) {
+    std::size_t index = 0;
+    for (; index < snapshots.size(); ++index) {
         const auto& snapshot = snapshots[index];
         const auto& use = snapshotUses[index];
-        if (snapshot.address != use.address) return miss(use.live ? SnapshotReuseMiss::LiveAddress : SnapshotReuseMiss::CopiedAddress);
+        if (snapshot.address != use.address) break;
         if (snapshot.bytes.size() != use.bytes) return miss(SnapshotReuseMiss::Size);
         if (use.live) {
             if (liveSnapshotCompared(snapshot.address, snapshot.bytes.size()) && std::memcmp(reinterpret_cast<const void*>(snapshot.address), snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::LiveBytes);
+        } else if (!copiedSnapshotMatches(snapshot)) return SnapshotMatch::Refused;
+    }
+    if (index == snapshots.size()) return SnapshotMatch::Same;
+    if (!std::is_sorted(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) { return std::pair{left.address, left.bytes.size()} < std::pair{right.address, right.bytes.size()}; }) ||
+        !std::is_sorted(snapshotUses.begin(), snapshotUses.end(), [](const auto& left, const auto& right) { return std::pair{left.address, left.bytes} < std::pair{right.address, right.bytes}; })) {
+        return miss(snapshotUses[index].live ? SnapshotReuseMiss::LiveAddress : SnapshotReuseMiss::CopiedAddress);
+    }
+    auto copied = snapshotUses.begin();
+    const auto nextCopied = [&] { while (copied != snapshotUses.end() && copied->live) ++copied; };
+    nextCopied();
+    for (const auto& snapshot : snapshots) {
+        if (copied == snapshotUses.end() || snapshot.address != copied->address || snapshot.bytes.size() != copied->bytes) continue;
+        if (!copiedSnapshotMatches(snapshot)) return SnapshotMatch::Refused;
+        ++copied;
+        nextCopied();
+    }
+    if (copied != snapshotUses.end()) return miss(SnapshotReuseMiss::MovedCopied);
+    return SnapshotMatch::Moved;
+}
+
+bool GuestBufferMemory::MovedSnapshotsLive(std::span<const GuestMemorySnapshot> snapshots) const {
+    Require(space != nullptr, "moved snapshot proof requires a resumed address space");
+    const auto miss = [](SnapshotReuseMiss reason) {
+        CountSnapshotReuseMiss(reason);
+        return false;
+    };
+    if (snapshots.size() != snapshotUses.size()) return miss(SnapshotReuseMiss::Length);
+    auto copied = snapshotUses.begin();
+    const auto nextCopied = [&] { while (copied != snapshotUses.end() && copied->live) ++copied; };
+    nextCopied();
+    for (const auto& snapshot : snapshots) {
+        if (copied != snapshotUses.end() && snapshot.address == copied->address && snapshot.bytes.size() == copied->bytes) {
+            ++copied;
+            nextCopied();
             continue;
         }
-        const auto found = std::upper_bound(regions.begin(), regions.end(), snapshot.address, [](std::uint64_t value, const Region& region) { return value < region.begin; });
-        if (found == regions.begin()) return miss(SnapshotReuseMiss::Backing);
-        const auto& region = *std::prev(found);
-        if (region.buffer == nullptr || region.direct != nullptr || region.mirror != nullptr || snapshot.address + snapshot.bytes.size() > region.end) return miss(SnapshotReuseMiss::Backing);
-        const auto bytes = region.buffer->Bytes();
-        const auto offset = static_cast<std::size_t>(snapshot.address - region.begin);
-        if (offset + snapshot.bytes.size() > bytes.size()) return miss(SnapshotReuseMiss::Backing);
-        if (std::memcmp(bytes.data() + offset, snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::CopiedBytes);
+        if (snapshot.bytes.empty() || snapshot.bytes.size() > std::numeric_limits<std::uint64_t>::max() - snapshot.address) return miss(SnapshotReuseMiss::MovedOutside);
+        const auto end = snapshot.address + snapshot.bytes.size();
+        const Region* owner = nullptr;
+        if (baseOverlap(snapshot.address, end, &owner) != BaseOverlap::Inside || owner == nullptr || (!owner->writable && !owner->hostBacked && owner->mirror == nullptr)) return miss(SnapshotReuseMiss::MovedOutside);
+        if (owner->sparse && std::none_of(owner->backed.begin(), owner->backed.end(), [&](const auto& range) { return range.first <= snapshot.address && end <= range.second; })) return miss(SnapshotReuseMiss::MovedOutside);
+        if (liveSnapshotCompared(snapshot.address, snapshot.bytes.size()) && std::memcmp(reinterpret_cast<const void*>(snapshot.address), snapshot.bytes.data(), snapshot.bytes.size()) != 0) return miss(SnapshotReuseMiss::LiveBytes);
     }
+    if (copied != snapshotUses.end()) return miss(SnapshotReuseMiss::MovedCopied);
     return true;
 }
 

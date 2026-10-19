@@ -787,6 +787,10 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
         const auto copiedAddress = snapshotMiss(SnapshotReuseMiss::CopiedAddress);
         std::fprintf(stderr, "[rescache] address snapshot refusals: count %llu, address %llu (old live %llu, old copied %llu), size %llu, live bytes %llu, backing %llu, copied bytes %llu\n", snapshotMiss(SnapshotReuseMiss::Length), liveAddress + copiedAddress, liveAddress, copiedAddress, snapshotMiss(SnapshotReuseMiss::Size), snapshotMiss(SnapshotReuseMiss::LiveBytes), snapshotMiss(SnapshotReuseMiss::Backing), snapshotMiss(SnapshotReuseMiss::CopiedBytes));
     }
+    if (reuse.movedSnapshotProofs != reuseSeen.movedSnapshotProofs || reuseCount(AddressReuse::Snapshots) != 0) {
+        const auto missed = [&](SnapshotReuseMiss kind) { return static_cast<unsigned long long>(reuse.snapshotMisses[static_cast<std::size_t>(kind)] - reuseSeen.snapshotMisses[static_cast<std::size_t>(kind)]); };
+        std::fprintf(stderr, "[rescache] moved snapshot proofs: %llu accepted before buffer-move check; refused: copied captures %llu, outside live space %llu, image tables %llu\n", static_cast<unsigned long long>(reuse.movedSnapshotProofs - reuseSeen.movedSnapshotProofs), missed(SnapshotReuseMiss::MovedCopied), missed(SnapshotReuseMiss::MovedOutside), missed(SnapshotReuseMiss::MovedTables));
+    }
     profile.reuseSeen = reuse;
     profile.leaseSeen = leases;
     profile.totalsUs.fill(0);
