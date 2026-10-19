@@ -423,6 +423,11 @@ void ReuseCounters(Scene& scene) {
     scene.Wait();
     after = AddressReuseCounters();
     Require(Counted(after, AddressReuse::InUse) - Counted(before, AddressReuse::InUse) == 1 && Counted(after, AddressReuse::Reused) - Counted(before, AddressReuse::Reused) == 1 && Refusals(after) - Refusals(before) == 1, "address draw reuse: a draw repeated before the previous one completed was not counted as one refusal in use");
+    const auto built = Builds();
+    scene.Draw();
+    scene.Wait();
+    Require(Builds() == built && scene.Color() == 255 && scene.Stored() == Bits(One), "address draw reuse: the completed incumbent did not serve the next draw");
+    after = AddressReuseCounters();
     before = after;
     scene.pixelProgram.back() ^= 1u;
     scene.Draw();
@@ -628,6 +633,11 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     std::memcpy(&spareStored, scene.spare.Data() + StoreOffset, sizeof(spareStored));
     Require(scene.Color() == 255 && scene.Stored() == Bits(One) && spareStored == Bits(Zero), "two queued storage roots shared their draw data");
     Require(Builds() == batchBuilds + 1 && Counted(afterBatch, AddressReuse::InUse) == Counted(beforeBatch, AddressReuse::InUse) + 1, "queued storage roots reused an in-flight BDA fault buffer");
+    const auto completedBuilds = Builds();
+    run(scene.guest, One);
+    run(scene.spare, Zero);
+    const auto afterNext = AddressReuseCounters();
+    Require(Builds() == completedBuilds && Counted(afterNext, AddressReuse::Reused) == Counted(afterBatch, AddressReuse::Reused) + 2 && Counted(afterNext, AddressReuse::InUse) == Counted(afterBatch, AddressReuse::InUse), "completed storage roots did not reuse the cached build independently");
 }
 
 void MovedAddressBuffer(AgcDriver::VulkanDevice& device) {
@@ -734,6 +744,52 @@ void MovedImageTableSnapshot(AgcDriver::VulkanDevice& device) {
     Require(Counted(after, AddressReuse::Snapshots) == Counted(before, AddressReuse::Snapshots) + 1, "a moved image table capture was not counted as a snapshot refusal");
     Require(!resources.HoldsLease(), "a refused moved image table proof retained its address space");
     resources.WriteBack();
+}
+
+void RetainInFlightCacheEntry(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    Pages memory{BlockBytes};
+    memory.Register(0, BlockBytes, true);
+    const std::array<std::uint32_t, 1> captured{0};
+    const std::array<GuestMemorySnapshot, 1> snapshots{{{memory.Address(), std::as_bytes(std::span(captured))}}};
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::RecompileResult fragment;
+    fragment.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+    fragment.bindings = {
+        {ShaderRecompiler::DescriptorKind::StorageBuffer, ShaderRecompiler::DescriptorRole::BdaPagetable, 0, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::BdaPagetable), 1, {}, false},
+        {ShaderRecompiler::DescriptorKind::StorageBuffer, ShaderRecompiler::DescriptorRole::FaultBuffer, 0, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::FaultBuffer), 1, {}, false},
+    };
+    const std::array<CompiledShader, 2> stages{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::Fragment, &fragment, 0}}};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    auto first = std::make_shared<ShaderResources>(context, stages, ColorTarget{}, 0, 0, 0, snapshots);
+    Require(first->ReusesAddressSpace() && first->Reusable(), "in-flight cache fixture did not produce reusable address resources");
+    auto held = first->BeginUse();
+    first->EndUse();
+    auto replacement = std::make_shared<ShaderResources>(context, stages, ColorTarget{}, 0, 0, 0, snapshots);
+    replacement->EndUse();
+    auto& cache = SharedResourceCache();
+    cache.Clear();
+    const ResourceCache::Key key{0xffffffffu, 1u, 0u, 0u};
+    cache.Insert(key, first);
+    Require(cache.Find(key) == first, "the first cache entry was not admitted");
+    std::vector<std::shared_ptr<ShaderResources>> evicted;
+    Require(first->InUse(), "the first cache entry did not retain its in-flight hold");
+    cache.Insert(key, replacement, &evicted);
+    Require(cache.Find(key) == first && cache.Size() == 1 && evicted.empty(), "inserting the same key displaced an in-flight cache entry");
+    Require(replacement.use_count() == 1, "the cache retained the rejected replacement");
+    held.reset();
+    Require(!first->InUse() && first->Revalidate(stages, nullptr, snapshots), "the retained entry could not be reused after completion");
+    first->EndUse();
+    cache.Insert(key, replacement, &evicted);
+    Require(cache.Find(key) == replacement && cache.Size() == 1 && evicted.size() == 1 && evicted.front() == first, "a completed cache entry was not replaceable");
+    cache.Remove(key, first.get());
+    Require(cache.Find(key) == replacement, "removing the old object erased its replacement");
+    cache.Remove(key, replacement.get());
+    Require(cache.Find(key) == nullptr && cache.Size() == 0, "removing the replacement left its cache entry behind");
+    first->WriteBack();
+    replacement->WriteBack();
+    cache.Clear();
 }
 
 void Fault(Scene& scene) {
@@ -1030,6 +1086,7 @@ int main(int argc, char** argv) {
             MovedLiveShaderData(*device);
             MovedAddressBuffer(*device);
             MovedImageTableSnapshot(*device);
+            RetainInFlightCacheEntry(*device);
             OversizedVertexBuffer(*device);
             ThrowingProof(*device);
         }
