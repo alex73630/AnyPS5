@@ -17,6 +17,7 @@
 #else
 #include <cerrno>
 #include <sys/utsname.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #endif
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -90,6 +91,14 @@ std::uint64_t processId() {
     return GetCurrentProcessId();
 #else
     return static_cast<std::uint64_t>(::getpid());
+#endif
+}
+
+std::uint64_t threadId() {
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#else
+    return static_cast<std::uint64_t>(::syscall(SYS_gettid));
 #endif
 }
 
@@ -203,7 +212,7 @@ TraceSummary identity(std::uint32_t width, std::uint32_t height, const VulkanDev
 
 std::vector<std::vector<TraceThread::Total>> totalsOf(const std::vector<std::unique_ptr<TraceThread>>& threads) {
     std::vector<std::vector<TraceThread::Total>> result;
-    for (const auto& thread : threads) result.push_back(thread->Collect().totals);
+    for (const auto& thread : threads) result.push_back(thread->Collect(false).totals);
     return result;
 }
 
@@ -217,7 +226,7 @@ void PerformanceTrace::BindThread(const char* name, std::size_t capacity) {
     if (!Configured() || local != nullptr) return;
     const bool windowed = std::getenv("APS5_TRACE_FRAMES") != nullptr || std::getenv("APS5_TRACE_SECONDS") != nullptr;
     if (windowed && capacity == TraceThread::DefaultCapacity) capacity = TraceThread::ParseCapacity(std::getenv("APS5_TRACE_EVENTS"));
-    auto bound = std::make_unique<TraceThread>(name, presentCount, windowed ? capacity : 0, buffering);
+    auto bound = std::make_unique<TraceThread>(name, presentCount, windowed ? capacity : 0, buffering, threadId());
     auto& state = session();
     std::lock_guard lock(state.mutex);
     local = bound.get();
@@ -250,7 +259,7 @@ void PerformanceTrace::FlushInterval(Clock::time_point now, std::uint32_t width,
     state.intervalBase.resize(state.threads.size());
     std::vector<TraceThread::Snapshot> snapshots;
     for (std::size_t index = 0; index < state.threads.size(); ++index) {
-        auto snapshot = state.threads[index]->Collect();
+        auto snapshot = state.threads[index]->Collect(false);
         auto totals = std::move(snapshot.totals);
         snapshot.slices = {};
         snapshot.totals = TraceFormat::Since(totals, state.intervalBase[index]);
@@ -295,6 +304,7 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
         state.started = true;
     }
     const auto present = state.present++;
+    presentCount.store(present, std::memory_order_relaxed);
     const auto edge = state.window ? state.window->Present(present, now - state.first) : TraceWindow::Edge::None;
     if (state.interval) {
         if (!state.intervalOpen) {
@@ -321,7 +331,6 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
             gpuRanges.reserve(GpuRangeCapacity);
         }
         state.presents.push_back(now);
-        presentCount.fetch_add(1, std::memory_order_relaxed);
         buffering.store(true, std::memory_order_relaxed);
         recording.store(true, std::memory_order_relaxed);
         ProfilePrint_nid_no_patch("[trace] recording %s from present %llu%s\n", state.window->Describe().c_str(), static_cast<unsigned long long>(present), state.gpuClock ? "" : "; no GPU track: the device has no calibrated timestamps");
@@ -329,12 +338,10 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
     }
     if (!state.windowOpen) {
         if (!state.interval) return;
-        presentCount.fetch_add(1, std::memory_order_relaxed);
         recording.store(true, std::memory_order_relaxed);
         return;
     }
     state.presents.push_back(now);
-    presentCount.fetch_add(1, std::memory_order_relaxed);
     if (edge != TraceWindow::Edge::Close) return;
     state.windowOpen = false;
     buffering.store(false, std::memory_order_relaxed);

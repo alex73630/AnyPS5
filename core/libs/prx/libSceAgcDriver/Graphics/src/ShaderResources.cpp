@@ -746,6 +746,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     RequireNoMultisampleTarget(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a texture read");
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
+        PerformanceTrace::Count("SampledTexture", "depth-view");
         logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
         return depth;
     }
@@ -939,6 +940,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 logLookup({it->texture.get(), resource, guestBytes, *keys, 0, it->source.get()});
                 reportTextureCounters();
                 if (profile) LookupOutcomes::Add(*keys != DccKeys::Uncompressed ? LookupOutcomes::SampledHitClearedView : LookupOutcomes::SampledHitView, start);
+                PerformanceTrace::Count("SampledTexture", "storage-view-hit");
                 return it->texture;
             }
         } else if (source == nullptr && it->surfaceBytes == guestBytes && it->keys == *keys) {
@@ -969,6 +971,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 logLookup({it->texture.get(), resource, guestBytes, *keys, generation, nullptr});
                 reportTextureCounters();
                 if (profile) LookupOutcomes::Add(LookupOutcomes::SampledHitSnapshot, start);
+                PerformanceTrace::Count("SampledTexture", "snapshot-hit");
                 return it->texture;
             }
         }
@@ -976,10 +979,12 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         else parkSnapshot(cache, it->bytes);
         eraseTexture(cache, it);
         ++cache.counts.stale;
+        PerformanceTrace::Count("SampledTexture", "stale");
     }
     if (source != nullptr) parkSnapshot(cache, recycled);
     else if (recycled.empty()) recycled = spareSnapshot(cache, bytes);
     CachedTexture entry{key, address, source != nullptr ? std::vector<std::byte>{} : (recycled.empty() ? std::vector<std::byte>(bytes) : std::move(recycled)), nullptr, *keys, snapshotGeneration};
+    PerformanceTrace::Count("SampledTexture", source != nullptr ? "storage-view-created" : "snapshot-created");
     entry.committed = std::move(committed);
     entry.surfaceBytes = bytes;
     const auto createTexture = [&](auto&&... args) {
@@ -1028,6 +1033,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     const auto budget = sampledBudget(context, cache);
     auto texture = entry.texture;
     if (!admitTexture(cache, key, entry.accounted, budget)) {
+        PerformanceTrace::Count("SampledTexture", "admission-refused");
         noteReleased(texture);
         logLookup({texture.get(), resource, guestBytes, *keys, generation, source.get()});
         reportCacheCounts(cache, budget);
@@ -1785,11 +1791,15 @@ BufferWriteCounters& BufferWrites() {
 }
 
 double ShaderResources::phase(BuildPhase which) {
-    if (!BuildProfiled()) return 0.0;
+    auto* trace = PerformanceTrace::DetailedThread();
+    if (!BuildProfiled() && trace == nullptr) return 0.0;
     const auto now = std::chrono::steady_clock::now();
     const auto ms = std::chrono::duration<double, std::milli>(now - phaseStart).count();
-    addBuildPhase(which, ms);
-    if (ms > 50) AgcDriver::ProfilePrint_nid_no_patch("[resources] %s took %.0f ms (%zu textures, %zu storage images, %zu buffers, bda %d)\n", BuildPhaseNames[static_cast<std::size_t>(which)], ms, textures.size(), storageTextures.size(), allocations.size(), usesBda ? 1 : 0);
+    if (trace != nullptr) trace->Measure("Resources.Phase", BuildPhaseNames[static_cast<std::size_t>(which)], phaseStart, now);
+    if (BuildProfiled()) {
+        addBuildPhase(which, ms);
+        if (ms > 50) AgcDriver::ProfilePrint_nid_no_patch("[resources] %s took %.0f ms (%zu textures, %zu storage images, %zu buffers, bda %d)\n", BuildPhaseNames[static_cast<std::size_t>(which)], ms, textures.size(), storageTextures.size(), allocations.size(), usesBda ? 1 : 0);
+    }
     phaseStart = now;
     return ms;
 }
@@ -2968,6 +2978,7 @@ void countKeysProven(bool storage) {
 }
 
 void countFullWalk(FastFail reason) {
+    if (reason != FastFail::Count) PerformanceTrace::Count("ResourceProof.full", FastFailNames[static_cast<std::size_t>(reason)]);
     if (BuildProfiled() && reason != FastFail::Count) Revalidations().fullByReason[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -3906,11 +3917,13 @@ std::shared_ptr<ShaderResources> ResourceCache::Find(const Key& key) {
     std::lock_guard lock(mutex);
     const auto found = index.find(key);
     if (found == index.end()) {
+        PerformanceTrace::Count("ResourceLookup", "key-miss");
         noteReturn(key);
         noteMiss(key);
         return nullptr;
     }
     entries.splice(entries.begin(), entries, found->second);
+    PerformanceTrace::Count("ResourceLookup", "candidate-hit");
     noteUse(key);
     return found->second->second;
 }
@@ -3992,9 +4005,11 @@ std::array<AdmissionCounts, 2>& DrawAdmissionCounts() {
     return counts;
 }
 
+constexpr std::array AdmissionNames{"copied-writes", "lease", "multisample", "loop-guard", "unresolved-table", "refreshed-texture", "large-data", "regions", "serial", "reusable", "no-build", "uncacheable", "unrecorded", "not-reusable", "attempt", "uncached-storage", "released-texture", "inserted", "replaced", "evicted"};
+static_assert(AdmissionNames.size() == static_cast<std::size_t>(ResourceCache::Admission::Count));
+
 void ReportDrawAdmission() {
-    constexpr std::array names{"copied-writes", "lease", "multisample", "loop-guard", "unresolved-table", "refreshed-texture", "large-data", "regions", "serial", "reusable", "no-build", "uncacheable", "unrecorded", "not-reusable", "attempt", "uncached-storage", "released-texture", "inserted", "replaced", "evicted"};
-    static_assert(names.size() == static_cast<std::size_t>(ResourceCache::Admission::Count));
+    const auto& names = AdmissionNames;
     auto& counts = DrawAdmissionCounts();
     for (std::size_t kind = 0; kind < counts.size(); ++kind) {
         std::string line = std::string("[rescache] draw admission (10 s, ") + (kind == 0 ? "direct" : "address") + "):";
@@ -4009,6 +4024,7 @@ void ReportDrawAdmission() {
 }
 
 void ResourceCache::CountAdmission(Admission reason, bool addressBased) {
+    PerformanceTrace::Count(addressBased ? "ResourceAdmission.address" : "ResourceAdmission.direct", AdmissionNames[static_cast<std::size_t>(reason)]);
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return;
     DrawAdmissionCounts()[addressBased ? 1 : 0][static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
@@ -5323,6 +5339,7 @@ void ShaderResources::resolveImageTables() {
                 reused->replayable = static_cast<std::uint64_t>(table.elementBase) + binding.count <= context.imageTableCapacity;
             }
             (replay ? counters.tablesReplayed : counters.tablesReused).fetch_add(1, std::memory_order_relaxed);
+            PerformanceTrace::Count("ImageTable", replay ? "replay" : "hit");
             continue;
         }
         ReusedTable fresh;
@@ -5426,6 +5443,7 @@ void ShaderResources::resolveImageTables() {
             fresh.bound[element] = bind(element, sampledWords, std::move(texture), resource, guestBytes, firstLayer);
         }
         counters.tablesResolved.fetch_add(1, std::memory_order_relaxed);
+        PerformanceTrace::Count("ImageTable", "resolved");
         if (reusable && CurrentTableState() == state) {
             const auto serial = StorageTexture::PendingSerial();
             if (!StorageTexture::AnyPendingOverlaps(fresh.ranges) && StorageTexture::PendingSerial() == serial) {

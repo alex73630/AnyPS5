@@ -1158,12 +1158,16 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
 std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& state, const VertexInputLayout& vertexInput, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders, VkImageLayout attachmentLayout, bool* created) {
     static const bool disabled = std::getenv("APS5_NO_PIPELINE_CACHE") != nullptr;
     if (created != nullptr) *created = false;
-    if (disabled) return std::make_shared<Pipeline>(context, state, vertexInput, resources, shaders, attachmentLayout);
+    if (disabled) {
+        PerformanceTrace::Count("GraphicsPipeline", "disabled");
+        return std::make_shared<Pipeline>(context, state, vertexInput, resources, shaders, attachmentLayout);
+    }
     auto& store = Pipelines();
     struct PipelineKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::byte>, PipelineKeyStorage>();
     pipelineKey(key, context, state, vertexInput, resources, shaders, attachmentLayout);
     if (key.empty()) {
+        PerformanceTrace::Count("GraphicsPipeline", "no-key");
         std::lock_guard lock(store.mutex);
         ++store.uncached;
         ++store.totals.uncached;
@@ -1195,6 +1199,7 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
         reportPipelines(store);
         bool collision = false;
         if (auto pipeline = lookup(collision)) {
+            PerformanceTrace::Count("GraphicsPipeline", "hit");
             ++store.hits;
             ++store.totals.hits;
             return pipeline;
@@ -1207,6 +1212,7 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
         }
         ++store.misses;
         ++store.totals.misses;
+        PerformanceTrace::Count("GraphicsPipeline", "miss");
     }
     // Built outside the mutex: a draw that finds its pipeline resident is not held behind another
     // thread's build (the journal replay builds here too), and a device's driver compiles in
@@ -1218,6 +1224,7 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
         std::lock_guard lock(store.mutex);
         bool collision = false;
         if (auto raced = lookup(collision)) {
+            PerformanceTrace::Count("GraphicsPipeline", "duplicate-build");
             static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
             if (profile) ProfilePrint_nid_no_patch("[pipeline-duplicate] kind=Vulkan.GraphicsPipeline source=%s\n", replaying ? "journal" : "draw");
             return raced;
