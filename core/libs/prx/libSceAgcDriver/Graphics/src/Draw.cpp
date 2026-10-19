@@ -1718,13 +1718,18 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
     // the alias checks instead. Debug aid: APS5_NO_DRAW_KEY_TRIM=1 keys them as before.
     static const bool trimKey = std::getenv("APS5_NO_DRAW_KEY_TRIM") == nullptr;
     resolved.cacheable = recordable && !noDrawResourceCache && !noTextureCache && std::all_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->PipelineVariantId() != 0; }) && !ShaderResources::NeverReusable(shaders);
+    const char* buildReason = "DrawResources.build.uncacheable";
     if (resolved.cacheable) {
         resolved.contentKey = DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
         auto cached = SharedResourceCache().Find(resolved.contentKey);
         const bool inUse = cached != nullptr && cached->InUse();
+        buildReason = inUse ? "DrawResources.build.in-use" : "DrawResources.build.miss";
         if (inUse) {
             CountAddressReuse(AddressReuse::InUse);
             PerformanceTrace::Count("DrawResources", "in-use");
+            const auto* recorder = Recorder::Active();
+            const bool sameBatch = recorder != nullptr && cached->LastRecordedSerial() != 0 && cached->LastRecordedSerial() == recorder->OpenSerial();
+            PerformanceTrace::Count("DrawResources", sameBatch ? "in-use-same-batch" : "in-use-other-batch");
         }
         if (cached != nullptr && !inUse) {
             const bool addressBased = cached->ReusesAddressSpace();
@@ -1753,6 +1758,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
                 if (proof.movedSnapshots) CountMovedSnapshotUse(true);
             } else if (valid) {
                 PerformanceTrace::Count("DrawResources", "buffer-move-refused");
+                buildReason = "DrawResources.build.buffer-move-refused";
                 if (addressBased && timer.profile) {
                     auto& stats = Profile();
                     std::lock_guard lock(stats.mutex);
@@ -1766,6 +1772,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
             } else {
                 SharedResourceCache().Remove(resolved.contentKey);
                 PerformanceTrace::Count("DrawResources", "invalidated");
+                buildReason = "DrawResources.build.invalidated";
                 countCache(&DrawProfile::cacheInvalidated);
             }
         }
@@ -1776,7 +1783,10 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
     timer.phase(PhaseLookup);
     if (resolved.resources == nullptr) {
         PerformanceTrace::Count("DrawResources", "built");
-        resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+        {
+            PerformanceTimer buildTiming(buildReason);
+            resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+        }
         resolved.use.resources = resolved.resources;
         resolved.built = &resolved.resources->Timing();
         outcome.addressBased = resolved.resources->HoldsLease();
