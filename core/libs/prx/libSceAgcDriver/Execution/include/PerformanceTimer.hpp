@@ -261,7 +261,7 @@ private:
 
 class PerformanceTimer {
 public:
-    explicit PerformanceTimer(const char* scope) : frame(PerformanceContext::Current()), trace(PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr), scope(scope) {
+    explicit PerformanceTimer(const char* scope, bool measure = false) : frame(PerformanceContext::Current()), trace(PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr), scope(scope), measure(measure) {
         if (frame != nullptr) {
             total = frame->Get(scope, "total");
         }
@@ -280,7 +280,10 @@ public:
         zone.End();
         if (frame == nullptr && trace == nullptr) return;
         const auto end = Clock::now();
-        if (trace != nullptr) trace->Add(scope, nullptr, start, end);
+        if (trace != nullptr) {
+            trace->Add(scope, nullptr, start, end);
+            if (measure) trace->Measure(scope, nullptr, start, end);
+        }
         trace = nullptr;
         if (frame == nullptr) return;
         if (tail != nullptr) frame->Add(tail, end - previous);
@@ -310,6 +313,7 @@ private:
     FrameTiming* frame;
     TraceThread* trace;
     const char* scope;
+    bool measure;
     [[no_unique_address]] TracyZone zone{scope};
     FrameTiming::Metric* total = nullptr;
     FrameTiming::Metric* tail = nullptr;

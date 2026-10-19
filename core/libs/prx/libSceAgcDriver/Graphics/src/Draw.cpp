@@ -1784,7 +1784,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
     if (resolved.resources == nullptr) {
         PerformanceTrace::Count("DrawResources", "built");
         {
-            PerformanceTimer buildTiming(buildReason);
+            PerformanceTimer buildTiming(buildReason, true);
             resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
         }
         resolved.use.resources = resolved.resources;
