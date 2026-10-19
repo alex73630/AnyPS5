@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_DRAWTIMING_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_DRAWTIMING_HPP
 
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -29,6 +30,9 @@ struct DrawPhaseTiming {
     bool profile;
     std::array<double, DrawDriverPhaseCount>& phaseMs;
     std::chrono::steady_clock::time_point& phaseLap;
+    TraceThread* trace = nullptr;
+    std::chrono::steady_clock::time_point started{};
+    ~DrawPhaseTiming();
     void Phase(DrawDriverPhase which);
 };
 

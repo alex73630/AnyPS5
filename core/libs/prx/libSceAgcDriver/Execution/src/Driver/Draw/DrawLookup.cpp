@@ -8,6 +8,7 @@ namespace AgcDriver::DriverDetail {
 
 void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<VulkanDevice>& localDevice, const Graphics::State& graphics, const ShaderRecompiler::ShaderPixelStageInfo& pixel, const std::vector<DrawProgram>& programs, const std::vector<ShaderRecompiler::ProgramRole>& roles, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, bool useDrawEntries, bool registerKey, bool profile, std::uint64_t& drawKey, std::shared_ptr<DrawEntry>& entry, std::vector<std::shared_ptr<DispatchVariant>>& matched, std::vector<std::vector<ShaderRecompiler::MemoryRegion>>& matchedRegions, bool& drawHit, bool& verifyHit, DrawPhaseTiming& phaseTiming, std::array<double, DrawDriverPhaseCount>& phaseMs, const std::shared_ptr<DrawEntry>& dataEntry, DrawDataCandidates& dataCandidates, std::vector<StageDataHit>& stageData) {
     using Role = ShaderRecompiler::ProgramRole;
+    if (!useDrawEntries) PerformanceTrace::Count("DrawShaderMiss", "entries-disabled");
     if (useDrawEntries) {
         if (!registerKey) {
             drawKey = 0xcbf29ce484222325ull;
@@ -104,6 +105,7 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
             else ++drawEntryCounters.absent;
             maybeReportDrawCache(profile);
         }
+        if (entry == nullptr) PerformanceTrace::Count("DrawShaderMiss", "key-absent");
         if (entry != nullptr) {
             const auto waitedBeforeValidate = profile ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
             std::optional<DrawMiss> miss;
@@ -214,18 +216,21 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
                 }
                 if (dataStages != 0 && verifyDrawDataHits()) drawHit = false;
             } else {
+                constexpr std::array names{"front-differing", "fragment-differing", "other-differing", "layout", "gate", "stages"};
+                static_assert(names.size() == static_cast<std::size_t>(DrawMiss::Count));
+                PerformanceTrace::Count("DrawShaderMiss", names[static_cast<std::size_t>(*miss)]);
                 ++counters.misses[static_cast<std::size_t>(*miss)];
                 if (registerKey && entry->decode != nullptr) ++counters.decodePartial;
             }
+            phaseTiming.Phase(DrawRowKeyLookupValidate);
             if (profile) {
-
-                phaseTiming.Phase(DrawRowKeyLookupValidate);
                 const auto waited = std::min(Graphics::Recorder::ThreadWaitedMs() - waitedBeforeValidate, phaseMs[DrawRowKeyLookupValidate]);
                 phaseMs[DrawRowKeyLookupValidate] -= waited;
                 phaseMs[DrawRowValidateWait] += waited;
                 counters.validateUs += phaseMs[DrawRowKeyLookupValidate] * 1000;
             }
         } else if (dataEntry != nullptr && graphics.stages.path == Graphics::ShaderPath::Vertex && dataEntry->stages.size() == programs.size() && dataEntry->decode->programs.size() == programs.size()) {
+            PerformanceTrace::Count("DrawShaderLookup", "data-entry");
             std::uint64_t imagesFlushed = 0, runsSynced = 0;
             const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::DrawCache);
             std::optional<SampledReadScope> sampling;

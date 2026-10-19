@@ -125,6 +125,14 @@ class TraceDigestTests(unittest.TestCase):
         self.assertFalse(result["counter_data_complete"])
         self.assertIn("Missing counts must not be interpreted as zero", trace_digest.markdown(result))
 
+    def test_slice_overflow_marks_partial_frames_without_invalidating_counters(self):
+        events = EVENTS + [{"ph": "i", "name": "trace buffer full", "ts": 10000, "tid": 1, "args": {"events_lost": 12}}]
+        result = trace_digest.digest(trace_digest.Trace({"traceEvents": events}), SUMMARY)
+        self.assertEqual([frame["slice_data_complete"] for frame in result["frame_details"]], [True, False, False])
+        self.assertEqual(result["frame_details"][1]["slice_incomplete_threads"], ["queue worker 0x0"])
+        self.assertTrue(result["counter_data_complete"])
+        self.assertIn("Missing slices must not be interpreted as idle", trace_digest.markdown(result))
+
     def test_perf_thread_identity_and_zero_alignment_warning(self):
         events = EVENTS + [{"ph": "M", "name": "thread_name", "tid": 1, "args": {"name": "queue worker 0x0", "os_tid": 11}}]
         trace = trace_digest.Trace({"traceEvents": events, "steady_clock_origin_ns": 10000000000})

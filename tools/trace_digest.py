@@ -38,6 +38,7 @@ class Trace:
         self.counters = []
         self.measurements = []
         self.counter_losses = []
+        self.slice_losses = []
         self.os_threads = {}
         self.origin_ns = document.get("steady_clock_origin_ns") if isinstance(document, dict) else None
         self.processes = set()
@@ -69,6 +70,8 @@ class Trace:
                 target.append((float(event["ts"]), event["tid"], event["name"], int(args["calls"]), args.get("present"), args.get("ns", 0)))
             elif phase == "i" and event.get("name") == "cache counters full":
                 self.counter_losses.append((float(event["ts"]), event["tid"], event["args"]["calls_lost"]))
+            elif phase == "i" and event.get("name") == "trace buffer full":
+                self.slice_losses.append((float(event["ts"]), event["tid"], event["args"]["events_lost"]))
             elif phase == "C":
                 self.folded[event["tid"]] += sum(float(value) for value in event.get("args", {}).values())
         self.presents.sort()
@@ -238,6 +241,8 @@ def frame_details(trace, frames, perf_samples, top):
                        "cache_calls": [{"thread": thread, "name": name, "calls": count} for (thread, name), count in counters[index].most_common()],
                        "measured_phases": [{"thread": thread, "name": name, "calls": values[0], "ms": values[1] / 1000000.0}
                                            for (thread, name), values in sorted(measured[index].items(), key=lambda item: -item[1][1])],
+                       "slice_data_complete": not any(at < end for at, _, _ in trace.slice_losses),
+                       "slice_incomplete_threads": sorted({trace.name(tid) for at, tid, _ in trace.slice_losses if at < end}),
                        "counter_data_complete": not any(at < end for at, _, _ in trace.counter_losses),
                        "counter_incomplete_threads": sorted({trace.name(tid) for at, tid, _ in trace.counter_losses if at < end}),
                        "sampled_threads": sampled})
@@ -256,6 +261,7 @@ def digest(trace, summary=None, stacks=None, worst=5, top=10, perf_samples=None)
         result["perf_samples"] = {"total": len(perf_samples), "in_process": sum(sample["pid"] in trace.processes for sample in perf_samples),
                                   "aligned": aligned}
         result["perf_warning"] = "No CPU samples overlap this process and capture; check the PID, clock and capture times." if aligned == 0 else None
+    result["slice_data_complete"] = not trace.slice_losses
     result["counter_data_complete"] = not trace.counter_losses
     result["counter_losses"] = [{"thread": trace.name(tid), "at_ms": at / 1000.0, "calls_lost": count} for at, tid, count in trace.counter_losses]
     cache_totals = collections.Counter()
@@ -379,6 +385,8 @@ def markdown(result):
     else:
         lines.append(f"{result['frames']} frames over {result['window_ms']:.1f} ms (no summary line found)")
     lines.append("")
+    if not result.get("slice_data_complete", True):
+        lines.extend(["Slice data is incomplete. Missing slices must not be interpreted as idle time.", ""])
     if not result.get("counter_data_complete", True):
         lines.extend(["Counter data is incomplete. Missing counts must not be interpreted as zero calls.", ""])
     if "perf_samples" in result:
@@ -397,6 +405,8 @@ def markdown(result):
         active = [entry for entry in frame["leaf_phases"] if not is_wait(entry["name"])]
         phases = ", ".join(f"{entry['name']} ({entry['thread']}) {entry['ms']:.1f} ms" for entry in active[:5])
         lines.append(f"- present {frame['present']}: {phases}")
+        if not frame.get("slice_data_complete", True):
+            lines.append("  - incomplete slices: " + ", ".join(frame["slice_incomplete_threads"]))
         if not frame.get("counter_data_complete", True):
             lines.append("  - incomplete counters: " + ", ".join(frame["counter_incomplete_threads"]))
         for entry in frame.get("measured_phases", [])[:5]:

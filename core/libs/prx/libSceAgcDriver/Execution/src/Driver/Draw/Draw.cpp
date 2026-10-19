@@ -216,10 +216,11 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     auto& phaseMs = tail.phaseMs;
     auto& captures = tail.captures;
     auto& phaseLap = tail.phaseLap;
-    phaseLap = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    auto* phaseTrace = PerformanceTrace::DetailedThread();
+    phaseLap = profile || phaseTrace != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     tail.profile = profile;
     tail.phaseTiming.profile = profile;
-    auto& phaseTiming = tail.phaseTiming;
+    DrawPhaseTiming phaseTiming{profile, phaseMs, phaseLap, phaseTrace, phaseLap};
     if (profile && packetStartedAt() != std::chrono::steady_clock::time_point{}) phaseMs[DrawRowPrologue] = std::chrono::duration<double, std::milli>(phaseLap - packetStartedAt()).count();
 
     const auto drawn = [&] {
@@ -630,9 +631,9 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
     using Role = ShaderRecompiler::ProgramRole;
     const bool profile = tail.profile;
     auto& phaseMs = tail.phaseMs;
-    auto& phaseLap = tail.phaseLap;
+    auto phaseLap = std::chrono::steady_clock::now();
     auto& captures = tail.captures;
-    auto& phaseTiming = tail.phaseTiming;
+    DrawPhaseTiming phaseTiming{profile, phaseMs, phaseLap, PerformanceTrace::DetailedThread(), phaseLap};
     auto& drawParameters = tail.drawParameters;
     const bool pipelined = tail.pipelined;
     static const bool pipelinedIndirect = std::getenv("APS5_NO_PIPELINED_INDIRECT") == nullptr;
@@ -768,12 +769,13 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
         pushCursorBytes = Graphics::StagePushOffset(pushCursorBytes, program.binary.stage, localDevice->GraphicsPipelineLibraries());
         pushOffsets[i] = pushCursorBytes;
         if (drawHit) {
-
+            PerformanceTrace::Count("DrawStage", stageData[i].compiled != nullptr ? "data-patched" : "reused");
             programResults[i] = stageData[i].compiled != nullptr ? stageData[i].compiled.get() : matched[i]->compiled.get();
             memory.insert(memory.end(), matchedRegions[i].begin(), matchedRegions[i].end());
         } else {
             const auto candidate = std::find_if(dataCandidates[i].begin(), dataCandidates[i].end(), [&](const auto& kept) { return kept.first->pushOffset == pushCursorBytes; });
             if (candidate != dataCandidates[i].end() && !verifyDrawDataHits()) {
+                PerformanceTrace::Count("DrawStage", "data-candidate");
                 matched[i] = candidate->first;
                 matchedRegions[i] = std::move(candidate->second);
                 reused[i] = true;

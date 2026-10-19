@@ -32,10 +32,15 @@ void Driver::addDrawPhases(const std::array<double, DrawDriverPhaseCount>& ms, b
     totals.packets = totals.drawn = totals.captures = 0;
 }
 
+DrawPhaseTiming::~DrawPhaseTiming() {
+    if (trace != nullptr) trace->Measure("Driver.Draw", "total", started, std::chrono::steady_clock::now());
+}
+
 void DrawPhaseTiming::Phase(DrawDriverPhase which) {
-    if (!profile) return;
+    if (!profile && trace == nullptr) return;
     const auto now = std::chrono::steady_clock::now();
-    phaseMs[which] += std::chrono::duration<double, std::milli>(now - phaseLap).count();
+    if (trace != nullptr) trace->Measure("Driver.Draw.Phase", DrawDriverPhaseNames[which], phaseLap, now);
+    if (profile) phaseMs[which] += std::chrono::duration<double, std::milli>(now - phaseLap).count();
     phaseLap = now;
 }
 
