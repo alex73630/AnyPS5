@@ -2513,12 +2513,31 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     set_tests_properties(agc_driver_pixel_implicit_derivatives PROPERTIES TIMEOUT 30)
+    foreach(mode IN ITEMS loop_guard transitions)
+        add_test(NAME agc_driver_address_draw_reuse_${mode} COMMAND agc_driver_address_draw_reuse_tests --uncached)
+        if(mode STREQUAL "loop_guard")
+            set(drawReuseSwitch APS5_LOOP_GUARD)
+        else()
+            set(drawReuseSwitch APS5_DRAW_TRANSITIONS)
+        endif()
+        set_tests_properties(agc_driver_address_draw_reuse_${mode} PROPERTIES
+                ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;${drawReuseSwitch}=1"
+                SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        if(WIN32)
+            set_tests_properties(agc_driver_address_draw_reuse_${mode} PROPERTIES ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
     add_test(NAME agc_driver_address_draw_reuse_probe COMMAND agc_driver_address_draw_reuse_tests)
+    add_test(NAME agc_driver_address_draw_reuse_in_use_guard COMMAND agc_driver_address_draw_reuse_tests)
+    set_tests_properties(agc_driver_address_draw_reuse_in_use_guard PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_IN_FLIGHT_DRAW_REUSE=1"
+            SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(agc_driver_address_draw_reuse_probe PROPERTIES
             ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_PROBE_IN_FLIGHT_REUSE=1"
             SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     if(WIN32)
-        set_tests_properties(agc_driver_address_draw_reuse_probe PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_driver_address_draw_reuse_probe agc_driver_address_draw_reuse_in_use_guard PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_driver_draw_cache_immediate_eviction COMMAND agc_driver_address_draw_reuse_tests --eviction)

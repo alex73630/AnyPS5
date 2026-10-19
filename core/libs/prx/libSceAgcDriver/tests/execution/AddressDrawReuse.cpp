@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
@@ -69,6 +70,10 @@ constexpr std::uint32_t ValueOffset = 16;
 constexpr std::uint32_t Sentinel = 0xdeadbeefu;
 constexpr float One = 1.0f;
 constexpr float Zero = 0.0f;
+
+bool InFlightReuse() {
+    return std::getenv("APS5_NO_IN_FLIGHT_DRAW_REUSE") == nullptr && std::getenv("APS5_PROBE_IN_FLIGHT_REUSE") == nullptr;
+}
 
 alignas(256) constexpr std::array<std::uint32_t, 6> VertexCode{
     0xe0382000, 0x80000005, 0xbf8c3f70, 0xf80008cf, 0x03020100, 0xbf810000,
@@ -335,6 +340,22 @@ struct Scene {
         return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
     }
 
+    void DrawRoot(Pages& root) {
+        using namespace AgcDriver::Graphics;
+        auto data = std::find_if(pixelResult.bindings.begin(), pixelResult.bindings.end(), [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::ShaderData; });
+        Require(data != pixelResult.bindings.end() && data->guestDescriptor.size() >= 2, "a root draw requires storage shader data");
+        const auto key = ShaderResources::ContentKey(shaders[1], false, true);
+        const auto address = root.Address();
+        data->guestDescriptor[0] = static_cast<std::uint32_t>(address);
+        data->guestDescriptor[1] = static_cast<std::uint32_t>(address >> 32u);
+        Require(ShaderResources::ContentKey(shaders[1], false, true) == key, "changing storage shader data changed the draw content key");
+        std::array<GuestMemorySnapshot, 3> captured{{snapshots[0], snapshots[1], {address, std::span<const std::byte>(reinterpret_cast<const std::byte*>(root.Data()), sizeof(std::uint64_t))}}};
+        std::sort(captured.begin(), captured.end(), [](const auto& left, const auto& right) { return left.address < right.address; });
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const AgcDriver::Pm4::DrawParameters parameters{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+        device.Draw(state, parameters, shaders, captured);
+    }
+
     void Wait() {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         device.WaitIdle();
@@ -419,11 +440,16 @@ void ReuseCounters(Scene& scene) {
     const auto reused = Counted(after, AddressReuse::Reused) - Counted(before, AddressReuse::Reused);
     Require(reused == Repeats && after.proofs - before.proofs == Repeats && Refusals(after) == Refusals(before), "address draw reuse: " + std::to_string(Repeats) + " repeated draws with unchanged inputs counted " + std::to_string(reused) + " reuses, " + std::to_string(after.proofs - before.proofs) + " proofs and " + std::to_string(Refusals(after) - Refusals(before)) + " refusals");
     before = after;
+    const auto queuedBuilds = Builds();
     scene.Draw();
     scene.Draw();
     scene.Wait();
     after = AddressReuseCounters();
-    Require(Counted(after, AddressReuse::InUse) - Counted(before, AddressReuse::InUse) == 1 && Counted(after, AddressReuse::Reused) - Counted(before, AddressReuse::Reused) == 1 && Refusals(after) - Refusals(before) == 1, "address draw reuse: a draw repeated before the previous one completed was not counted as one refusal in use");
+    if (InFlightReuse()) {
+        Require(Counted(after, AddressReuse::InUse) == Counted(before, AddressReuse::InUse) && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 2 && after.inFlightReused == before.inFlightReused + 1 && Builds() == queuedBuilds, "address draw reuse: a queued draw did not reuse resources with an isolated fault buffer");
+    } else {
+        Require(Counted(after, AddressReuse::InUse) - Counted(before, AddressReuse::InUse) == 1 && Counted(after, AddressReuse::Reused) - Counted(before, AddressReuse::Reused) == 1 && Refusals(after) - Refusals(before) == 1, "address draw reuse: a draw repeated before the previous one completed was not counted as one refusal in use");
+    }
     const auto built = Builds();
     scene.Draw();
     scene.Wait();
@@ -488,6 +514,10 @@ void PendingSnapshotWrite(Scene& scene) {
     Require(scene.Color() == 255, "address draw reuse: the draw with a captured pointer did not read the guest value");
     const auto rewritten = scene.guest.Address(RewrittenOffset);
     const std::array<std::uint32_t, 4> pattern{static_cast<std::uint32_t>(rewritten), static_cast<std::uint32_t>(rewritten >> 32u), 0u, 0u};
+    if (InFlightReuse()) {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        draw();
+    }
     const auto before = AgcDriver::Graphics::AddressReuseCounters();
     const auto built = Builds();
     {
@@ -570,23 +600,10 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     Require(data != scene.pixelResult.bindings.end() && data->guestDescriptor.size() >= 2, "the moved data test requires storage shader data");
     const auto originalWords = data->guestDescriptor;
     Require(originalWords[0] == static_cast<std::uint32_t>(scene.guest.Address()) && originalWords[1] == static_cast<std::uint32_t>(scene.guest.Address() >> 32u), "the storage root is not in the expected shader data words");
-    const auto originalKey = ShaderResources::ContentKey(scene.shaders[1], false, true);
     Scene::Store(scene.spare, ValueOffset, Zero);
     const auto spareValue = scene.spare.Address(ValueOffset);
     std::memcpy(scene.spare.Data() + PointerOffset, &spareValue, sizeof(spareValue));
-    const auto issue = [&](Pages& root) {
-        const auto address = root.Address();
-        data->guestDescriptor[0] = static_cast<std::uint32_t>(address);
-        data->guestDescriptor[1] = static_cast<std::uint32_t>(address >> 32u);
-        Require(ShaderResources::ContentKey(scene.shaders[1], false, true) == originalKey, "changing storage shader data changed the draw content key");
-        std::array<GuestMemorySnapshot, 3> snapshots{{scene.snapshots[0], scene.snapshots[1], {address, std::span<const std::byte>(reinterpret_cast<const std::byte*>(root.Data()), sizeof(std::uint64_t))}}};
-        std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) { return left.address < right.address; });
-        {
-            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-            const AgcDriver::Pm4::DrawParameters parameters{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
-            scene.device.Draw(scene.state, parameters, scene.shaders, snapshots);
-        }
-    };
+    const auto issue = [&](Pages& root) { scene.DrawRoot(root); };
     const auto run = [&](Pages& root, float expected) {
         std::memcpy(scene.guest.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
         std::memcpy(scene.spare.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
@@ -624,16 +641,26 @@ void MovedLiveShaderData(AgcDriver::VulkanDevice& device) {
     Require(Builds() == built && Counted(afterBuffer, AddressReuse::Reused) == Counted(beforeBuffer, AddressReuse::Reused) + 1, "a moved guest buffer inside the base did not reuse its address build");
     std::memcpy(scene.guest.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
     std::memcpy(scene.spare.Data() + StoreOffset, &Sentinel, sizeof(Sentinel));
+    const auto guestGeneration = AgcDriver::GuestMemory::CollectWrites(scene.guest.Address(), BlockBytes);
+    const auto spareGeneration = AgcDriver::GuestMemory::CollectWrites(scene.spare.Address(), BlockBytes);
     const auto batchBuilds = Builds();
     const auto beforeBatch = AddressReuseCounters();
     issue(scene.spare);
     issue(scene.guest);
     scene.Wait();
     const auto afterBatch = AddressReuseCounters();
+    if (AgcDriver::GuestMemory::WriteWatched()) {
+        Require(AgcDriver::GuestMemory::WrittenSince(scene.guest.Address(StoreOffset), sizeof(float), guestGeneration), "the first queued store did not mark its page written");
+        Require(AgcDriver::GuestMemory::WrittenSince(scene.spare.Address(StoreOffset), sizeof(float), spareGeneration), "the second queued store did not mark its page written");
+    }
     std::uint32_t spareStored = Sentinel;
     std::memcpy(&spareStored, scene.spare.Data() + StoreOffset, sizeof(spareStored));
     Require(scene.Color() == 255 && scene.Stored() == Bits(One) && spareStored == Bits(Zero), "two queued storage roots shared their draw data");
-    Require(Builds() == batchBuilds + 1 && Counted(afterBatch, AddressReuse::InUse) == Counted(beforeBatch, AddressReuse::InUse) + 1, "queued storage roots reused an in-flight BDA fault buffer");
+    if (InFlightReuse()) {
+        Require(Builds() == batchBuilds && afterBatch.inFlightReused == beforeBatch.inFlightReused + 1, "queued storage roots did not reuse their build with isolated fault buffers");
+    } else {
+        Require(Builds() == batchBuilds + 1 && Counted(afterBatch, AddressReuse::InUse) == Counted(beforeBatch, AddressReuse::InUse) + 1, "queued storage roots reused an in-flight BDA fault buffer");
+    }
     const auto completedBuilds = Builds();
     run(scene.guest, One);
     run(scene.spare, Zero);
@@ -883,6 +910,118 @@ void Fault(Scene& scene) {
 #endif
 }
 
+void WrittenPageIsolation(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    Pages first{BlockBytes};
+    Pages second{BlockBytes};
+    first.Register(0, BlockBytes, true);
+    second.Register(0, BlockBytes, true);
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    BdaResources resources(context);
+    auto firstFault = BdaResources::CreateFaultBuffer(context);
+    auto secondFault = BdaResources::CreateFaultBuffer(context);
+    const auto claim = [&](Buffer& fault, std::uint64_t address) {
+        auto* words = reinterpret_cast<std::uint32_t*>(fault.Bytes().data());
+        words[Abi::WrittenListWord] = 0;
+        words[Abi::WrittenSlotsWord] = Abi::WrittenChunkKey(address);
+        words[Abi::WrittenSlotsWord + 1] = 1u << ((address >> Abi::WrittenPageShift) & (Abi::WrittenChunkPages - 1u));
+        words[Abi::WrittenCountWord] = 1;
+    };
+    claim(*firstFault, first.Address());
+    claim(*secondFault, second.Address());
+    const auto generation = AgcDriver::GuestMemory::CollectWrites(second.Address(), BlockBytes);
+    resources.CheckFault(firstFault.get());
+    const auto* firstWords = reinterpret_cast<const std::uint32_t*>(firstFault->Bytes().data());
+    const auto* secondWords = reinterpret_cast<const std::uint32_t*>(secondFault->Bytes().data());
+    Require(firstWords[Abi::WrittenCountWord] == 0 && firstWords[Abi::WrittenSlotsWord] == 0 && secondWords[Abi::WrittenCountWord] == 1, "one completion consumed another use's written-page record");
+    if (AgcDriver::GuestMemory::WriteWatched()) Require(!AgcDriver::GuestMemory::WrittenSince(second.Address(), PageBytes, generation), "the first completion marked the second use's page");
+    resources.CheckFault();
+    Require(secondWords[Abi::WrittenCountWord] == 1, "the original buffer consumed a per-use written-page record");
+    resources.CheckFault(secondFault.get());
+    Require(secondWords[Abi::WrittenCountWord] == 0 && secondWords[Abi::WrittenSlotsWord] == 0, "the second completion did not drain its written-page record");
+    if (AgcDriver::GuestMemory::WriteWatched()) Require(AgcDriver::GuestMemory::WrittenSince(second.Address(), PageBytes, generation), "the second completion did not mark its own page");
+}
+
+void QueuedFaultIsolation(AgcDriver::VulkanDevice& device, bool separateBatches) {
+    using namespace AgcDriver::Graphics;
+    Scene scene(device, 0, static_cast<std::uint32_t>(BlockBytes / 16u), true);
+    scene.spare.Register(0, BlockBytes, true);
+    Pages inaccessible{BlockBytes};
+    const auto unmapped = inaccessible.Address();
+    std::memcpy(scene.spare.Data() + PointerOffset, &unmapped, sizeof(unmapped));
+    scene.DrawRoot(scene.guest);
+    scene.Wait();
+    scene.DrawRoot(scene.guest);
+    scene.Wait();
+    scene.Clear();
+    const auto before = AddressReuseCounters();
+    const auto built = Builds();
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    Require(context.recorder != nullptr, "fault isolation requires a recorder");
+    std::string first;
+    StderrCapture log;
+    std::string text;
+    try {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        scene.DrawRoot(separateBatches ? scene.guest : scene.spare);
+        const auto serial = separateBatches ? context.recorder->SubmitAndEpoch() : 0;
+        scene.DrawRoot(separateBatches ? scene.spare : scene.guest);
+        if (separateBatches) {
+            context.recorder->Submit();
+            Check(context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue), "vkQueueWaitIdle fault isolation");
+            context.recorder->FinishUpTo(serial);
+            first = log.Finish();
+        } else {
+            scene.Wait();
+            text = log.Finish();
+        }
+    } catch (...) {
+        static_cast<void>(log.Finish());
+        throw;
+    }
+    if (separateBatches) {
+        StderrCapture later;
+        try {
+            scene.Wait();
+        } catch (...) {
+            static_cast<void>(later.Finish());
+            throw;
+        }
+        text = later.Finish();
+        Require(first.find("BDA access failed") == std::string::npos, "a valid draw consumed a later submission's fault: " + first);
+    }
+    const auto after = AddressReuseCounters();
+    Require(!InFlightReuse() || (Builds() == built && after.inFlightReused == before.inFlightReused + 1), "queued fault isolation did not exercise in-flight reuse");
+    char address[64];
+    std::snprintf(address, sizeof(address), "address=0x%llx", static_cast<unsigned long long>(unmapped));
+    Require(text.find("BDA access failed") != std::string::npos && text.find(address) != std::string::npos && text.find("reason=1") != std::string::npos, "a queued draw lost its fault: " + text);
+    Require(text.find("incomplete or invalid") == std::string::npos && text.find("without publication") == std::string::npos, "queued draws corrupted a fault record: " + text);
+    Require(scene.Stored() == Bits(One), "a valid queued draw lost its BDA store");
+    if (InFlightReuse()) {
+        const auto next = Builds();
+        scene.DrawRoot(scene.guest);
+        scene.Wait();
+        Require(Builds() == next + 1 && Counted(AddressReuseCounters(), AddressReuse::NotReusable) == Counted(after, AddressReuse::NotReusable) + 1, "a faulting shared build remained reusable");
+        const auto idle = AddressReuseCounters();
+        scene.DrawRoot(scene.guest);
+        scene.Wait();
+        const auto reused = AddressReuseCounters();
+        Require(Builds() == next + 1 && reused.inFlightReused == idle.inFlightReused && Counted(reused, AddressReuse::Reused) == Counted(idle, AddressReuse::Reused) + 1, "an idle draw did not return to its own fault buffer");
+    }
+}
+
+void UncachedQueuedDraws(AgcDriver::VulkanDevice& device) {
+    Scene scene(device, 0);
+    const auto before = AgcDriver::Graphics::AddressReuseCounters();
+    scene.Draw();
+    scene.Draw();
+    scene.Wait();
+    Require(scene.Color() == 255 && scene.Stored() == Bits(One), "uncached queued draws changed their output");
+    if (std::getenv("APS5_LOOP_GUARD") != nullptr) Require(AgcDriver::Graphics::AddressReuseCounters().inFlightReused == before.inFlightReused, "loop-guarded draws reused an in-flight build");
+}
+
 void Remap(Scene& scene) {
     scene.Clear();
     scene.Draw();
@@ -1107,6 +1246,15 @@ void DecodeCacheHit() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::strcmp(argv[1], "--uncached") == 0) {
+            {
+                const auto device = OpenVulkanTestDevice();
+                if (!device) return VulkanTestSkipped;
+                UncachedQueuedDraws(*device);
+            }
+            AgcDriverShutdown_nid_postfix();
+            return 0;
+        }
         if (argc == 2 && std::strcmp(argv[1], "--eviction") == 0) {
             {
                 const auto device = OpenVulkanTestDevice();
@@ -1138,6 +1286,9 @@ int main(int argc, char** argv) {
             }
             MovedLiveSnapshot(*device);
             MovedLiveShaderData(*device);
+            WrittenPageIsolation(*device);
+            QueuedFaultIsolation(*device, false);
+            QueuedFaultIsolation(*device, true);
             MovedAddressBuffer(*device);
             MovedImageTableSnapshot(*device);
             RetainInFlightCacheEntry(*device);
