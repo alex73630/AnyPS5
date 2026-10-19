@@ -813,6 +813,7 @@ void DrawCacheEvictionLifetime(AgcDriver::VulkanDevice& device) {
     }
     scene.Draw();
     Require(cache.Find(key) == nullptr, "the draw did not evict the fixture entry");
+    Require(cache.Size() == 1, "draw eviction retained an extra cache entry");
     const bool deferred = std::getenv("APS5_NO_DEFERRED_EVICTION") == nullptr;
     Require(lifetime.expired() != deferred, "draw eviction did not follow the configured release policy");
     scene.Wait();
@@ -1095,6 +1096,16 @@ void DecodeCacheHit() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::strcmp(argv[1], "--eviction") == 0) {
+            {
+                const auto device = OpenVulkanTestDevice();
+                if (!device) return VulkanTestSkipped;
+                DrawCacheEvictionLifetime(*device);
+            }
+            AgcDriverShutdown_nid_postfix();
+            std::puts("draw cache eviction lifetime test passed");
+            return 0;
+        }
         const std::size_t ranges = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 512;
         const std::size_t draws = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 64;
         {
