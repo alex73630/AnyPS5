@@ -2836,7 +2836,13 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
     // never reusable).
     if (cacheable && built != nullptr && recorded && resources->Reusable()) {
         ResourceCache::CountAdmission(ResourceCache::Admission::Attempt, resources->UsesAddressTable());
-        SharedResourceCache().Insert(contentKey, resources);
+        static const bool deferEviction = std::getenv("APS5_NO_DEFERRED_EVICTION") == nullptr;
+        std::vector<std::shared_ptr<ShaderResources>> evicted;
+        SharedResourceCache().Insert(contentKey, resources, deferEviction ? &evicted : nullptr);
+        for (auto& object : evicted) {
+            object->KeepStorageImageBytes(*recorder);
+            recorder->Keep(std::move(object));
+        }
     } else {
         const auto reason = built == nullptr ? ResourceCache::Admission::NoBuild : !cacheable ? ResourceCache::Admission::Uncacheable : !recorded ? ResourceCache::Admission::Unrecorded : ResourceCache::Admission::NotReusable;
         ResourceCache::CountAdmission(reason, resources->UsesAddressTable());

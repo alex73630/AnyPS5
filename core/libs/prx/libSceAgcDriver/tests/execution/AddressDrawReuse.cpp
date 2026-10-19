@@ -40,6 +40,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -792,6 +793,37 @@ void RetainInFlightCacheEntry(AgcDriver::VulkanDevice& device) {
     cache.Clear();
 }
 
+void DrawCacheEvictionLifetime(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    Scene scene(device, 0, 16, true);
+    scene.Clear();
+    auto& cache = SharedResourceCache();
+    cache.Clear();
+    cache.SetBase(1, 8);
+    const ResourceCache::Key key{1};
+    std::weak_ptr<ShaderResources> lifetime;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+        auto resources = std::make_shared<ShaderResources>(context, scene.shaders, scene.state.color, 1, 0, 0, scene.snapshots);
+        resources->EndUse();
+        cache.Insert(key, resources);
+        Require(cache.Find(key) == resources, "draw eviction fixture was not admitted");
+        lifetime = resources;
+    }
+    scene.Draw();
+    Require(cache.Find(key) == nullptr, "the draw did not evict the fixture entry");
+    const bool deferred = std::getenv("APS5_NO_DEFERRED_EVICTION") == nullptr;
+    Require(lifetime.expired() != deferred, "draw eviction did not follow the configured release policy");
+    scene.Wait();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!lifetime.expired() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(lifetime.expired(), "an evicted draw resource outlived its completed batch");
+    Require(scene.Color() == 255 && scene.Stored() == Bits(One), "deferring an eviction changed the recorded draw");
+    cache.Clear();
+    cache.SetBase(ResourceCache::InitialEntries, 8);
+}
+
 void Fault(Scene& scene) {
     void* reserved = nullptr;
 #ifdef _WIN32
@@ -1087,6 +1119,7 @@ int main(int argc, char** argv) {
             MovedAddressBuffer(*device);
             MovedImageTableSnapshot(*device);
             RetainInFlightCacheEntry(*device);
+            DrawCacheEvictionLifetime(*device);
             OversizedVertexBuffer(*device);
             ThrowingProof(*device);
         }
