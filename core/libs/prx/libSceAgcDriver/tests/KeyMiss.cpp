@@ -24,18 +24,17 @@ struct Binding {
 };
 
 std::vector<std::uint32_t> shaderKey(bool dataWords, bool movable, const std::vector<Binding>& bindings) {
-    std::vector<std::uint32_t> key{dataWords ? 1u : 0u, 0u, 7u, 0u, static_cast<std::uint32_t>(bindings.size())};
+    ShaderRecompiler::RecompileResult program;
     for (const auto& binding : bindings) {
-        const bool data = binding.role == DescriptorRole::ShaderData || binding.role == DescriptorRole::FlattenedSrt;
-        for (const auto word : {0u, static_cast<std::uint32_t>(binding.role), 0u, 0u, binding.count, 0u, 0u, static_cast<std::uint32_t>(binding.words.size())}) key.push_back(word);
-        const bool emitted = (movable && binding.role == DescriptorRole::GuestBuffers && binding.words.size() == binding.count * 4u) || (dataWords && !movable) || !data;
-        if (emitted) key.insert(key.end(), binding.words.begin(), binding.words.end());
-        for (int flags = 0; flags < 9; ++flags) key.push_back(0u);
-        key.push_back(0u);
-        key.push_back(static_cast<std::uint32_t>(binding.shapes.size()));
-        key.insert(key.end(), binding.shapes.begin(), binding.shapes.end());
+        ShaderRecompiler::DescriptorBinding descriptor{};
+        descriptor.role = binding.role;
+        descriptor.count = binding.count;
+        descriptor.guestDescriptor = binding.words;
+        if (binding.role == DescriptorRole::GuestBuffers) descriptor.bufferWritten.assign(binding.count, true);
+        for (const auto shape : binding.shapes) descriptor.imageShapes.push_back(static_cast<ShaderRecompiler::DescriptorImageShape>(shape));
+        program.bindings.push_back(std::move(descriptor));
     }
-    return key;
+    return ShaderResources::ContentKey({ShaderRecompiler::ShaderStage::Compute, &program, 0}, dataWords, movable);
 }
 
 std::vector<std::uint32_t> drawKey(std::uint32_t device, const std::vector<std::uint32_t>& stage, std::uint32_t target) {
@@ -140,6 +139,33 @@ void testDrawKey() {
     compare(drawKey(5, shaderKey(true, true, data), 0x1000), std::nullopt, "movable draw keys leave data words out");
 }
 
+void testPackedBindingFlags() {
+    ShaderRecompiler::RecompileResult program;
+    ShaderRecompiler::DescriptorBinding descriptor{};
+    descriptor.role = DescriptorRole::GuestImages;
+    descriptor.count = 1;
+    descriptor.guestDescriptor = {20, 21, 22, 23, 24, 25, 26, 27};
+    descriptor.imageUnnormalizedBaseLevel.assign(65, false);
+    descriptor.bufferWritten.assign(2, true);
+    descriptor.imageSamplers = {0, 1};
+    descriptor.imageShapes = {ShaderRecompiler::DescriptorImageShape::Image2D};
+    program.bindings = {descriptor, descriptor};
+    const auto key = [&] { return ShaderResources::ContentKey({ShaderRecompiler::ShaderStage::Compute, &program, 0}); };
+    const auto base = key();
+    ContentKeyDiff diff;
+    program.bindings[0].imageUnnormalizedBaseLevel[64] = true;
+    check(ShaderResources::DiffContentKeys(base, key(), false, diff), "packed base-level flags were not comparable");
+    expectOnly(diff, ContentKeyComponent::Other, "packed base-level flags had the wrong component");
+    program.bindings[0] = descriptor;
+    program.bindings[0].bufferWritten[1] = false;
+    check(ShaderResources::DiffContentKeys(base, key(), false, diff), "buffer write flags were not comparable");
+    expectOnly(diff, ContentKeyComponent::Other, "buffer write flags had the wrong component");
+    program.bindings[0] = descriptor;
+    program.bindings[1].guestDescriptor[5] += 1;
+    check(ShaderResources::DiffContentKeys(base, key(), false, diff), "binding after packed flags was not comparable");
+    expectOnly(diff, ContentKeyComponent::Image, "binding after packed flags had the wrong component");
+}
+
 }
 
 int main() {
@@ -147,6 +173,7 @@ int main() {
         testDispatchKey();
         testDispatchKeyWithDevice();
         testDrawKey();
+        testPackedBindingFlags();
         std::puts("Key miss attribution passed");
         return 0;
     } catch (const std::exception& error) {
