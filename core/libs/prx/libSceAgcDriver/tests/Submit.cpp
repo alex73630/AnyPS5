@@ -261,6 +261,25 @@ void testEndOfPipeInterrupts() {
         check(output->ready.load() == static_cast<int>(4 + sustainedFlips + index), "flip paired with a release interrupt was not handed to its output");
         check(owner->GetTriggeredEvents(events.data(), 2) == 0, "a flip raised an event within two flips of the queue's own release interrupt");
     }
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "release before CPU flips submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(owner->GetTriggeredEvents(events.data(), 2) == 1, "release before CPU flips did not deliver its event");
+    for (int index = 0; index < 6; ++index) {
+        const auto ready = output->ready.load();
+        std::exception_ptr failure;
+        std::thread submitter([&] {
+            try {
+                AgcDriverSubmitFlip_nid_postfix({7, -2, 1, 0});
+            } catch (...) {
+                failure = std::current_exception();
+            }
+        });
+        submitter.join();
+        if (failure) std::rethrow_exception(failure);
+        AgcDriverWaitIdle_nid_postfix();
+        check(output->ready.load() == ready + 1, "CPU flip was not handed to its output");
+        check(owner->GetTriggeredEvents(events.data(), 2) == (index >= 4 ? 1 : 0), "CPU flip did not respect the release-interrupt latch");
+    }
     AgcDriverUnregisterVideoOutput_nid_postfix(7, output);
     alignas(8) static volatile std::uint64_t label = 0;
     const auto labelAddress = reinterpret_cast<std::uintptr_t>(&label);
