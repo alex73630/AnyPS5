@@ -525,11 +525,11 @@ void MovedLiveSnapshot(AgcDriver::VulkanDevice& device) {
     auto before = AddressReuseCounters();
     run(scene.guest.Address(48));
     auto after = AddressReuseCounters();
-    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1 && after.movedSnapshotProofs == before.movedSnapshotProofs + 1, "a live capture moved within its import rebuilt the resources");
+    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1 && after.movedSnapshotProofs == before.movedSnapshotProofs + 1 && after.movedSnapshotCandidates == before.movedSnapshotCandidates + 1 && after.movedSnapshotReused == before.movedSnapshotReused + 1 && after.movedSnapshotBuffersRefused == before.movedSnapshotBuffersRefused, "a live capture moved within its import rebuilt the resources");
     before = after;
     run(scene.spare.Address(48));
     after = AddressReuseCounters();
-    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1, "a live capture moved to another import rebuilt the resources");
+    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1 && after.movedSnapshotProofs == before.movedSnapshotProofs + 1 && after.movedSnapshotReused == before.movedSnapshotReused + 1, "a live capture moved to another import rebuilt the resources");
     alignas(256) std::array<std::uint32_t, 1> outside = captured;
     before = after;
     run(AddressOf(outside.data()));

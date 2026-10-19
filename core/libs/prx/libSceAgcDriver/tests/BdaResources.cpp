@@ -221,6 +221,10 @@ void spaceReuseTests(const Context& context) {
 }
 
 void movedSnapshotTests(const Context& context) {
+    if (!AddressSpaceCounters().enabled) {
+        std::cout << "address space cache disabled: moved snapshot reuse not tested\n";
+        return;
+    }
     constexpr std::size_t piece = 65536;
     auto* block = static_cast<std::byte*>(::operator new(3 * piece, std::align_val_t{piece}));
     std::memset(block, 0x5a, 3 * piece);
@@ -255,6 +259,9 @@ void movedSnapshotTests(const Context& context) {
         } else {
             const auto within = captures(address + 512, copied);
             const auto reordered = captures(address + 2 * piece + 128, copied);
+            auto unsorted = within;
+            std::reverse(unsorted.begin(), unsorted.end());
+            Require(memory.MatchSnapshots(unsorted) == SnapshotMatch::Refused, "an unsorted moved capture list was accepted");
             Require(memory.MatchSnapshots(original) == SnapshotMatch::Same, "the original snapshot set changed its classification");
             Require(memory.MatchSnapshots(within) == SnapshotMatch::Moved, "a moved live capture was not identified");
             memory.SuspendSpace();

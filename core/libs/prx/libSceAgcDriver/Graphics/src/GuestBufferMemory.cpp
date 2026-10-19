@@ -162,6 +162,9 @@ AddressSpaceCache& Spaces() {
 struct AddressReuseCounts {
     std::atomic<std::uint64_t> proofs{0};
     std::atomic<std::uint64_t> movedSnapshotProofs{0};
+    std::atomic<std::uint64_t> movedSnapshotCandidates{0};
+    std::atomic<std::uint64_t> movedSnapshotReused{0};
+    std::atomic<std::uint64_t> movedSnapshotBuffersRefused{0};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(AddressReuse::Count)> outcomes{};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SpaceResumeMiss::Count)> resumeMisses{};
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SnapshotReuseMiss::Count)> snapshotMisses{};
@@ -3298,6 +3301,15 @@ AddressSpaceStats AddressSpaceCounters() {
     return {addressSpaceCacheEnabled(), load(cache.hits), load(cache.rebuiltFirst), load(cache.rebuiltGeneration), load(cache.rebuiltEpoch), load(cache.rebuiltDevice), load(cache.rebuiltWaiterDrop), load(cache.unpublished), load(cache.dissolvedOverlap), load(cache.dissolvedImports), load(cache.waiterDrops)};
 }
 
+void CountMovedSnapshotCandidate() {
+    ReuseCounts().movedSnapshotCandidates.fetch_add(1, std::memory_order_relaxed);
+}
+
+void CountMovedSnapshotUse(bool reused) {
+    auto& counts = ReuseCounts();
+    (reused ? counts.movedSnapshotReused : counts.movedSnapshotBuffersRefused).fetch_add(1, std::memory_order_relaxed);
+}
+
 void CountMovedSnapshotProof() {
     ReuseCounts().movedSnapshotProofs.fetch_add(1, std::memory_order_relaxed);
 }
@@ -3329,6 +3341,9 @@ AddressReuseStats AddressReuseCounters() {
     AddressReuseStats stats;
     stats.proofs = load(counts.proofs);
     stats.movedSnapshotProofs = load(counts.movedSnapshotProofs);
+    stats.movedSnapshotCandidates = load(counts.movedSnapshotCandidates);
+    stats.movedSnapshotReused = load(counts.movedSnapshotReused);
+    stats.movedSnapshotBuffersRefused = load(counts.movedSnapshotBuffersRefused);
     for (std::size_t index = 0; index < stats.outcomes.size(); ++index) stats.outcomes[index] = load(counts.outcomes[index]);
     for (std::size_t index = 0; index < stats.resumeMisses.size(); ++index) stats.resumeMisses[index] = load(counts.resumeMisses[index]);
     for (std::size_t index = 0; index < stats.snapshotMisses.size(); ++index) stats.snapshotMisses[index] = load(counts.snapshotMisses[index]);
@@ -6036,7 +6051,7 @@ SnapshotMatch GuestBufferMemory::MatchSnapshots(std::span<const GuestMemorySnaps
     if (index == snapshots.size()) return SnapshotMatch::Same;
     if (!std::is_sorted(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) { return std::pair{left.address, left.bytes.size()} < std::pair{right.address, right.bytes.size()}; }) ||
         !std::is_sorted(snapshotUses.begin(), snapshotUses.end(), [](const auto& left, const auto& right) { return std::pair{left.address, left.bytes} < std::pair{right.address, right.bytes}; })) {
-        return miss(snapshotUses[index].live ? SnapshotReuseMiss::LiveAddress : SnapshotReuseMiss::CopiedAddress);
+        return miss(snapshotUses[index].live ? SnapshotReuseMiss::UnsortedLive : SnapshotReuseMiss::UnsortedCopied);
     }
     auto copied = snapshotUses.begin();
     const auto nextCopied = [&] { while (copied != snapshotUses.end() && copied->live) ++copied; };
