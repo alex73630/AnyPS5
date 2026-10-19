@@ -110,6 +110,7 @@ std::vector<std::byte> copySource(std::uint64_t source, std::size_t bytes, bool 
         const auto value = static_cast<std::uint32_t>(source);
         for (std::size_t i = 0; i < bytes; ++i) data[i] = static_cast<std::byte>(value >> ((i % 4) * 8));
     } else {
+        const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::CopySource);
         GuestMemory::Read(source, data);
     }
     return data;

@@ -1848,7 +1848,10 @@ VkImageAspectFlags storeBackClearedHtile(const Context& context, const DepthTarg
         }
     }
     std::vector<std::uint32_t> words(bytes / 4u);
-    GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(words)), 4);
+    {
+        const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::DepthMetadata);
+        GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(words)), 4);
+    }
     VkImageAspectFlags cleared = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
     for (const auto word : words) cleared &= HtileFillClears(word, target.htileStencil);
     auto generation = collected;
