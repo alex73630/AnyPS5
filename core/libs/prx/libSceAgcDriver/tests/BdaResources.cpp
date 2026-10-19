@@ -220,6 +220,78 @@ void spaceReuseTests(const Context& context) {
     ::operator delete(block, std::align_val_t{piece});
 }
 
+void movedSnapshotTests(const Context& context) {
+    constexpr std::size_t piece = 65536;
+    auto* block = static_cast<std::byte*>(::operator new(3 * piece, std::align_val_t{piece}));
+    std::memset(block, 0x5a, 3 * piece);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    auto importing = context;
+    importing.hostImportAlignment = piece;
+    const auto change = [&](std::size_t offset, bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, block + offset, piece, true, true, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, block + offset);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    change(0, true);
+    change(2 * piece, true);
+    std::array<std::byte, 16> bytes;
+    bytes.fill(std::byte{0x5a});
+    const auto captures = [&](std::uint64_t live, std::uint64_t copy) {
+        std::array<GuestMemorySnapshot, 2> result{{{live, bytes}, {copy, bytes}}};
+        std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) { return left.address < right.address; });
+        return result;
+    };
+    const auto copied = address + piece + 128;
+    const auto original = captures(address + 128, copied);
+    {
+        GuestBufferMemory memory(importing);
+        memory.AcquireRegistered();
+        for (const auto& snapshot : original) memory.AddSnapshot(snapshot);
+        memory.Upload(true);
+        if (!memory.SpaceRegions().has_value() || memory.CopiedBytes() != bytes.size()) {
+            std::cout << "registered ranges are copied per build here: moved snapshot reuse not tested\n";
+            memory.WriteBack();
+        } else {
+            const auto within = captures(address + 512, copied);
+            const auto reordered = captures(address + 2 * piece + 128, copied);
+            Require(memory.MatchSnapshots(original) == SnapshotMatch::Same, "the original snapshot set changed its classification");
+            Require(memory.MatchSnapshots(within) == SnapshotMatch::Moved, "a moved live capture was not identified");
+            memory.SuspendSpace();
+            bool refusedSuspended = false;
+            try { memory.MovedSnapshotsLive(within); } catch (const std::exception&) { refusedSuspended = true; }
+            Require(refusedSuspended, "a moved snapshot was checked without its address space");
+            Require(memory.ResumeSpace(), "the unchanged address space could not be resumed");
+            Require(memory.MovedSnapshotsLive(within), "a live capture moved inside its import was refused");
+            Require(memory.MatchSnapshots(reordered) == SnapshotMatch::Moved && memory.MovedSnapshotsLive(reordered), "moving a live capture across a copied capture into another import was refused");
+            block[512] ^= std::byte{0xff};
+            Require(!memory.MovedSnapshotsLive(within), "a moved capture with stale bytes was accepted");
+            block[512] ^= std::byte{0xff};
+            const auto outside = captures(address + piece + 512, copied);
+            Require(memory.MatchSnapshots(outside) == SnapshotMatch::Moved && !memory.MovedSnapshotsLive(outside), "a capture moved outside the leased space was accepted");
+            const auto crossing = captures(address + piece - 8, copied);
+            Require(memory.MatchSnapshots(crossing) == SnapshotMatch::Moved && !memory.MovedSnapshotsLive(crossing), "a capture crossing the end of a base region was accepted");
+            Require(memory.MatchSnapshots(captures(address + 512, copied + 32)) == SnapshotMatch::Refused, "a moved copied capture was accepted");
+            Require(memory.MatchSnapshots(captures(address + 512, address + 1024)) == SnapshotMatch::Refused, "a copied capture was replaced with a live capture");
+            const auto overlapping = captures(copied + 8, copied);
+            Require(memory.MatchSnapshots(overlapping) == SnapshotMatch::Moved && !memory.MovedSnapshotsLive(overlapping), "a live capture moved over a snapshot copy was accepted");
+            auto changedCopy = bytes;
+            changedCopy[0] ^= std::byte{0xff};
+            auto wrongCopy = reordered;
+            wrongCopy[0].bytes = changedCopy;
+            Require(memory.MatchSnapshots(wrongCopy) == SnapshotMatch::Refused, "reordering concealed changed copied bytes");
+            memory.SuspendSpace();
+            change(piece, true);
+            Require(!memory.ResumeSpace(), "moved snapshots reused an address space after its registry changed");
+            change(piece, false);
+        }
+    }
+    ClearSnapshotCopies(importing.device);
+    change(0, false);
+    change(2 * piece, false);
+    ::operator delete(block, std::align_val_t{piece});
+}
+
 void importCrossingTests(const Context& context, const BdaTestAccess& access) {
     constexpr std::size_t half = 65536;
     void* block = ::operator new(2 * half, std::align_val_t{half});
@@ -3988,6 +4060,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     addressTableKeyTests();
     snapshotTableTests(context, access);
     spaceReuseTests(context);
+    movedSnapshotTests(context);
     addressMovedBufferTests(context);
     addressRejectedTableElementTests(context);
     addressFailedSubmissionTests(context, access);

@@ -14,6 +14,7 @@
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include "Recompiler.hpp"
+#include "ImageTableAbi.hpp"
 #include "VulkanTestDevice.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -498,6 +499,93 @@ void PendingSnapshotWrite(Scene& scene) {
     Require(scene.Color() == 255 && scene.Stored() == Bits(One), "address draw reuse: the draw after the captured pointer was restored did not read the guest value");
 }
 
+void MovedLiveSnapshot(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    Scene scene(device, 0);
+    scene.spare.Register(0, BlockBytes, true);
+    const std::array<std::uint32_t, 1> captured{Bits(One)};
+    std::memcpy(scene.guest.Data() + 48, captured.data(), sizeof(captured));
+    std::memcpy(scene.spare.Data() + 48, captured.data(), sizeof(captured));
+    const auto draw = [&](std::uint64_t address) {
+        std::array<GuestMemorySnapshot, 3> snapshots{{scene.snapshots[0], scene.snapshots[1], {address, std::as_bytes(std::span(captured))}}};
+        std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) { return left.address < right.address; });
+        const AgcDriver::Pm4::DrawParameters parameters{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+        scene.device.Draw(scene.state, parameters, scene.shaders, snapshots);
+    };
+    const auto run = [&](std::uint64_t address) {
+        scene.Clear();
+        scene.Point(address);
+        { std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex()); draw(address); }
+        scene.Wait();
+        Require(scene.Color() == 255 && scene.Stored() == Bits(One), "moved snapshot reuse changed the draw output");
+    };
+    run(scene.guest.Address(ValueOffset));
+    run(scene.guest.Address(ValueOffset));
+    auto built = Builds();
+    auto before = AddressReuseCounters();
+    run(scene.guest.Address(48));
+    auto after = AddressReuseCounters();
+    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1 && after.movedSnapshotProofs == before.movedSnapshotProofs + 1, "a live capture moved within its import rebuilt the resources");
+    before = after;
+    run(scene.spare.Address(48));
+    after = AddressReuseCounters();
+    Require(Builds() == built && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused) + 1, "a live capture moved to another import rebuilt the resources");
+    alignas(256) std::array<std::uint32_t, 1> outside = captured;
+    before = after;
+    run(AddressOf(outside.data()));
+    after = AddressReuseCounters();
+    Require(Builds() == built + 1 && Counted(after, AddressReuse::Snapshots) == Counted(before, AddressReuse::Snapshots) + 1, "a capture outside the leased space reused the resources");
+    run(scene.guest.Address(ValueOffset));
+    run(scene.guest.Address(ValueOffset));
+    const std::array<std::uint32_t, 4> pattern{};
+    scene.Point(scene.guest.Address(48));
+    built = Builds();
+    before = AddressReuseCounters();
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        Require(scene.device.FillBuffer(scene.guest.Address(48), 16, pattern), "the pending write over a moved capture was not recorded");
+        draw(scene.guest.Address(48));
+    }
+    scene.Wait();
+    Require(scene.Color() == 0 && scene.Stored() == Bits(Zero), "a draw after a GPU write over its moved capture read stale data");
+    after = AddressReuseCounters();
+    Require(Builds() == built + 1 && Counted(after, AddressReuse::Snapshots) == Counted(before, AddressReuse::Snapshots) + 1 && Counted(after, AddressReuse::Reused) == Counted(before, AddressReuse::Reused), "a pending GPU write over a moved capture did not invalidate reuse");
+}
+
+void MovedImageTableSnapshot(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    namespace Abi = ShaderRecompiler::ImageTableAbi;
+    Pages memory{BlockBytes};
+    memory.Register(0, BlockBytes, true);
+    const std::array<std::uint32_t, 1> captured{0};
+    const std::array<GuestMemorySnapshot, 1> original{{{memory.Address(), std::as_bytes(std::span(captured))}}};
+    const std::array<GuestMemorySnapshot, 1> moved{{{memory.Address(64), std::as_bytes(std::span(captured))}}};
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::RecompileResult fragment;
+    fragment.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+    std::vector<std::uint32_t> map(Abi::HeaderWords);
+    map[Abi::HeaderVersion] = Abi::Version;
+    fragment.bindings = {
+        {ShaderRecompiler::DescriptorKind::StorageBuffer, ShaderRecompiler::DescriptorRole::BdaPagetable, 0, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::BdaPagetable), 1, {}, false},
+        {ShaderRecompiler::DescriptorKind::StorageBuffer, ShaderRecompiler::DescriptorRole::FaultBuffer, 0, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::FaultBuffer), 1, {}, false},
+        {ShaderRecompiler::DescriptorKind::StorageBuffer, ShaderRecompiler::DescriptorRole::ImageTableMap, 0, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::ImageTableMap), 1, map, false},
+    };
+    const std::array<CompiledShader, 2> stages{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::Fragment, &fragment, 0}}};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    ShaderResources resources(context, stages, ColorTarget{}, 0, 0, 0, original);
+    Require(resources.ReusesAddressSpace() && resources.Reusable(), "the image table fixture did not produce reusable address resources");
+    resources.EndUse();
+    Require(resources.Revalidate(stages, nullptr, original), "an unchanged image table capture was refused");
+    resources.EndUse();
+    const auto before = AddressReuseCounters();
+    Require(!resources.Revalidate(stages, nullptr, moved), "a moved image table capture reused unproven address metadata");
+    const auto after = AddressReuseCounters();
+    Require(Counted(after, AddressReuse::Snapshots) == Counted(before, AddressReuse::Snapshots) + 1, "a moved image table capture was not counted as a snapshot refusal");
+    Require(!resources.HoldsLease(), "a refused moved image table proof retained its address space");
+    resources.WriteBack();
+}
+
 void Fault(Scene& scene) {
     void* reserved = nullptr;
 #ifdef _WIN32
@@ -788,6 +876,8 @@ int main(int argc, char** argv) {
                 Remap(scene);
                 scene.Wait();
             }
+            MovedLiveSnapshot(*device);
+            MovedImageTableSnapshot(*device);
             OversizedVertexBuffer(*device);
             ThrowingProof(*device);
         }

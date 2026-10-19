@@ -239,9 +239,11 @@ AddressSpaceStats AddressSpaceCounters();
 
 enum class AddressReuse : std::uint8_t { Reused, NotReusable, InUse, Snapshots, Space, Proof, Imports, Threw, Moved, Count };
 enum class SpaceResumeMiss : std::uint8_t { State, Replaced, Device, Generation, Epoch, Mirrors, Count };
-enum class SnapshotReuseMiss : std::uint8_t { Length, LiveAddress, CopiedAddress, Size, LiveBytes, Backing, CopiedBytes, Count };
+enum class SnapshotReuseMiss : std::uint8_t { Length, LiveAddress, CopiedAddress, Size, LiveBytes, Backing, CopiedBytes, MovedCopied, MovedOutside, MovedTables, Count };
+enum class SnapshotMatch : std::uint8_t { Same, Moved, Refused };
 struct AddressReuseStats {
     std::uint64_t proofs = 0;
+    std::uint64_t movedSnapshotProofs = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(AddressReuse::Count)> outcomes{};
     std::array<std::uint64_t, static_cast<std::size_t>(SpaceResumeMiss::Count)> resumeMisses{};
     std::array<std::uint64_t, static_cast<std::size_t>(SnapshotReuseMiss::Count)> snapshotMisses{};
@@ -253,6 +255,8 @@ struct AddressReuseStats {
     std::uint64_t heldImportRefusalsHeld = 0;
 };
 void CountAddressReuseProof();
+void CountMovedSnapshotProof();
+void CountSnapshotReuseMiss(SnapshotReuseMiss reason);
 void CountAddressReuse(AddressReuse outcome, std::uint64_t proofNs = 0);
 void HoldReusedSpace(bool held);
 AddressReuseStats AddressReuseCounters();
@@ -396,13 +400,16 @@ public:
     void DeviceReads(std::vector<std::pair<std::uint64_t, std::uint64_t>>& out) const;
     std::optional<std::vector<std::pair<std::uint64_t, std::uint64_t>>> SpaceRegions() const;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> DirectWrites() const;
-    bool SameSnapshots(std::span<const GuestMemorySnapshot> snapshots) const;
+    SnapshotMatch MatchSnapshots(std::span<const GuestMemorySnapshot> snapshots) const;
+    bool SameSnapshots(std::span<const GuestMemorySnapshot> snapshots) const { return MatchSnapshots(snapshots) == SnapshotMatch::Same; }
+    bool MovedSnapshotsLive(std::span<const GuestMemorySnapshot> snapshots) const;
     void SuspendSpace() noexcept;
     bool ResumeSpace();
     bool SpaceImportsCurrent();
     std::shared_ptr<const void> SpaceHold() const { return space; }
 
 private:
+    bool copiedSnapshotMatches(const GuestMemorySnapshot& snapshot) const;
     struct SnapshotUse {
         std::uint64_t address;
         std::size_t bytes;
