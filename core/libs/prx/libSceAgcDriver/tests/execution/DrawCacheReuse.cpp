@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "VulkanTestDevice.hpp"
+#include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -139,6 +140,7 @@ void ThirdDrawHitsTheCache(bool libraries) {
     const auto mode = std::string(libraries ? "with" : "without") + " graphics pipeline libraries";
     const auto layout = counters.misses[static_cast<std::size_t>(DrawMiss::Layout)];
     Require(counters.lookups == 3 && counters.absent == 2, mode + ": the three draws made " + std::to_string(counters.lookups) + " draw-cache lookups (" + std::to_string(counters.absent) + " without an entry), expected 3 lookups with 2 absent");
+    Require(counters.unloggedAdmits == 0, mode + ": admission prediction skipped required capture logs");
     Require(counters.inserts == 1, mode + ": the three draws inserted " + std::to_string(counters.inserts) + " draw entries, expected 1: a key is cached the second time it is seen");
     Require(layout == 0, mode + ": the repeated draw missed the draw cache on its push offset (" + std::to_string(layout) + " layout misses)");
     Require(counters.hits == 1, mode + ": the repeated draw did not reuse the cached draw (" + std::to_string(counters.hits) + " hits)");
@@ -156,6 +158,7 @@ void UserDataDrawsReuseTheirShape(bool libraries) {
     Require(stages == 6, mode + ": the three data-only hits accounted " + std::to_string(stages) + " stages, expected 6");
     Require(verify ? known.dataVerified - before.dataVerified == 3 : known.dataStagesReused - before.dataStagesReused == 3, mode + ": the data-only hits reused " + std::to_string(known.dataStagesReused - before.dataStagesReused) + " stages and verified " + std::to_string(known.dataVerified - before.dataVerified) + ", expected the 3 vertex stages, whose user words did not change");
     const auto fresh = Submit(16.0f, {5.0f, 6.0f, 7.0f});
+    Require(fresh.unloggedAdmits == before.unloggedAdmits, mode + ": shape admission prediction skipped required capture logs");
     Require(fresh.inserts - known.inserts == 1, mode + ": three keys of a new shape inserted " + std::to_string(fresh.inserts - known.inserts) + " draw entries, expected 1: the shape's second key");
     Require(fresh.dataHits - known.dataHits == 1, mode + ": the third key of a new shape made " + std::to_string(fresh.dataHits - known.dataHits) + " data-only hits, expected 1");
 }
@@ -170,6 +173,7 @@ void StageDataHitsRefreshTheirWords(bool libraries) {
     PixelConstant[0] = 0.25f;
     const auto before = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
     const auto cached = SubmitConstantDraws(3);
+    Require(cached.unloggedAdmits == before.unloggedAdmits, mode + ": data-stage admission prediction skipped required capture logs");
     Require(cached.inserts - before.inserts == 1 && cached.hits - before.hits == 1, mode + ": three draws of a pixel shader reading a constant through its user words did not insert once and hit once");
     Require(!enabled || cached.stageDataInserts - before.stageDataInserts == 1, mode + ": the inserted draw recorded " + std::to_string(cached.stageDataInserts - before.stageDataInserts) + " stages with data positions, expected the fragment stage");
     Require(BrightestColorByte() == 64, mode + ": the draws of constant 0.25 wrote " + std::to_string(BrightestColorByte()) + ", expected 64");
@@ -274,11 +278,32 @@ void CaptureOnlyWaitsForTheWordsItReads() {
     }
 }
 
+void CacheAdmissionRequiresReadLogs() {
+    using namespace AgcDriver::DriverDetail;
+    std::array<StageCapture, 2> stages;
+    std::vector<bool> reused(2, false);
+    auto capture = std::make_shared<ShaderRecompiler::ResourceCapture>();
+    stages[0].compiled = std::make_shared<ShaderRecompiler::RecompileResult>();
+    stages[0].capture = capture;
+    Require(CompiledCapturesLogged(stages, reused), "logged stages or inactive stages were refused");
+    capture->readsLogged = false;
+    Require(!CompiledCapturesLogged(stages, reused), "an unlogged compiled stage was admitted");
+    reused[0] = true;
+    Require(CompiledCapturesLogged(stages, reused), "a reused stage required fresh capture logs");
+    reused[0] = false;
+    stages[0].capture.reset();
+    Require(!CompiledCapturesLogged(stages, reused), "a compiled stage without a capture was admitted");
+    stages[0].compiled.reset();
+    Require(CompiledCapturesLogged(stages, reused), "an inactive stage required capture logs");
+}
+
 void SightingsKeepCollidingKeys() {
     DrawKeySightings sightings(DrawKeySightings::Ways);
+    Require(!sightings.SeenBefore(0, false) && !sightings.SeenBefore(0, false), "peeking recorded an unseen draw key");
     Require(!sightings.SeenBefore(0) && sightings.SeenBefore(0), "draw key 0 was not admitted at its second sight");
     Require(!sightings.SeenBefore(11) && !sightings.SeenBefore(12), "an unseen draw key was admitted");
     Require(sightings.SeenBefore(11) && sightings.SeenBefore(12) && sightings.SeenBefore(11), "two keys in one bucket, drawn in turn, were not admitted at their second sight");
+    Require(sightings.SeenBefore(0, false) && !sightings.SeenBefore(13, false) && !sightings.SeenBefore(14, false), "peeking lost an existing key or admitted an unseen key");
     Require(!sightings.SeenBefore(13) && !sightings.SeenBefore(14), "an unseen draw key was admitted");
     Require(!sightings.SeenBefore(0), "the oldest key of a full bucket was kept over the newest");
     Require(sightings.SeenBefore(12) && sightings.SeenBefore(13) && sightings.SeenBefore(14), "a full bucket lost a key newer than the one it replaced");
@@ -288,6 +313,7 @@ void SightingsKeepCollidingKeys() {
 
 int main() {
     try {
+        CacheAdmissionRequiresReadLogs();
         SightingsKeepCollidingKeys();
         bool libraries = false;
         {

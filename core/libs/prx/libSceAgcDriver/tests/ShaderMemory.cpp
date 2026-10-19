@@ -1565,12 +1565,13 @@ void verifySrtTape() {
         std::vector<std::pair<std::uint64_t, std::int32_t>> userDataReads;
         bool operator==(const Walk&) const = default;
     };
-    const auto walk = [](const IrResourcePlan& plan, SrtRuntime runtime, bool tape) {
+    const auto walk = [](const IrResourcePlan& plan, SrtRuntime runtime, bool tape, bool logReads = true) {
         Walk out;
         SrtReadTrace trace;
         SrtUserDataUse use;
         runtime.readTrace = &trace;
         runtime.userDataUse = &use;
+        runtime.logReads = logReads;
         const std::vector<std::uint32_t> sources(plan.materializationSources.begin(), plan.materializationSources.end());
         const std::vector<std::uint8_t> clean(plan.cleanFlatSlots.begin(), plan.cleanFlatSlots.end());
         const auto sourceSpan = tape ? std::span<const std::uint32_t>(plan.materializationSources) : std::span<const std::uint32_t>(sources);
@@ -1641,6 +1642,32 @@ void verifySrtTape() {
     const auto guardedPlan = GetResourcePlan(requestFor(0x24000u, guarded));
     require(!guardedPlan->controlFlow.empty() && guardedPlan->info.images.size() == 1u, "SRT tape: the guarded program has no branch around its image");
     const auto imageActivity = guardedPlan->descriptorSources.size();
+    srt.fill(0u);
+    std::copy(valid.begin(), valid.end(), srt.begin());
+    std::copy(outputV.begin(), outputV.end(), srt.begin() + 16);
+    srt[20] = 1u;
+    require(answers(*guardedPlan, runtimeFor(userData)), "SRT read logs: the comparison fixture fell back to the interpreter");
+    for (const bool tape : {false, true}) {
+        auto logged = walk(*guardedPlan, runtimeFor(userData), tape);
+        const auto unlogged = walk(*guardedPlan, runtimeFor(userData), tape, false);
+        require(logged.ok && !logged.userDataReads.empty(), "SRT read logs: the reference walk did not read memory");
+        logged.leaves.clear();
+        logged.reads.clear();
+        logged.userDataReads.clear();
+        require(logged == unlogged, "SRT read logs: disabling logs changed the walk or retained read addresses");
+    }
+    {
+        const auto request = requestFor(0x24000u, guarded);
+        AgcDriver::ShaderMemory loggedMemory({});
+        AgcDriver::ShaderMemory unloggedMemory({});
+        unloggedMemory.SetReadLogs(false);
+        const auto logged = loggedMemory.Capture(request);
+        const auto unlogged = unloggedMemory.Capture(request);
+        require(logged->readsLogged && !unlogged->readsLogged, "SRT read logs: ShaderMemory did not propagate the logging policy");
+        require(!logged->userDataUse.reads.empty() && unlogged->userDataUse.reads.empty() && unlogged->readTrace.leaves.empty() && unlogged->readTrace.otherReads.empty(), "SRT read logs: the capture retained skipped read addresses");
+        require(logged->userDataUse.asBase == unlogged->userDataUse.asBase && logged->userDataUse.asValue == unlogged->userDataUse.asValue, "SRT read logs: the capture changed user-word dependencies");
+        verifyResult(*Recompile(request, *logged), *Recompile(request, *unlogged));
+    }
     for (const auto& [image, mode] : std::array<std::pair<const std::array<std::uint32_t, 8>*, std::uint32_t>, 4>{{{&invalid, 0u}, {&invalid, 1u}, {&valid, 0u}, {&valid, 1u}}}) {
         srt.fill(0u);
         std::copy(image->begin(), image->end(), srt.begin());
@@ -8774,7 +8801,14 @@ int main(int argc, char** argv) {
             require(std::find(trace.otherReads.begin(), trace.otherReads.end(), address) != trace.otherReads.end(), "the table pointer read was not traced among the other reads");
             require(std::find(trace.otherReads.begin(), trace.otherReads.end(), reinterpret_cast<std::uintptr_t>(&payload)) == trace.otherReads.end(), "the payload counts as a walk read");
         }
+        AgcDriver::ShaderMemory quietMemory({});
+        quietMemory.SetReadLogs(false);
+        const auto quietCapture = quietMemory.Capture(request);
+        require(!quietCapture->readsLogged && quietCapture->readTrace.leaves.empty() && quietCapture->readTrace.otherReads.empty() && quietCapture->userDataUse.reads.empty(), "pure-slot read logs: the unlogged capture retained read addresses");
+        require(quietCapture->snapshot.flattenedSrt == capture->snapshot.flattenedSrt && quietCapture->userDataUse.asBase == capture->userDataUse.asBase && quietCapture->userDataUse.asValue == capture->userDataUse.asValue, "pure-slot read logs: disabling logs changed payloads or user-word dependencies");
+        const auto quietRegions = quietMemory.Regions();
         auto regions = memory.Regions();
+        require(regions.size() == quietRegions.size() && std::equal(regions.begin(), regions.end(), quietRegions.begin(), [](const auto& a, const auto& b) { return a.guestAddress == b.guestAddress && std::ranges::equal(a.bytes, b.bytes); }), "pure-slot read logs: disabling logs changed the captured memory");
         std::size_t capturedBytes = 0;
         for (const auto& region : regions) capturedBytes += region.bytes.size();
         require(capturedBytes == sizeof(table) + sizeof(payload), "nested pointer reads were not captured");
@@ -8787,6 +8821,7 @@ int main(int argc, char** argv) {
         const auto cached = Recompile(request);
         require(cached.cacheHit, "unchanged shader did not hit the cache");
         verifyResult(first, cached);
+        verifyResult(*Recompile(request, *capture), *Recompile(request, *quietCapture));
         auto relocated = request;
         relocated.shader.codeAddress += 0x1000;
         require(Recompile(relocated).cacheHit, "shader relocation caused recompilation");

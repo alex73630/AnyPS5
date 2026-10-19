@@ -26,6 +26,11 @@ bool Driver::drawEntries() {
     return entries;
 }
 
+bool Driver::lazyReadLogs() {
+    static const bool enabled = std::getenv("APS5_NO_LAZY_READ_LOGS") == nullptr;
+    return enabled;
+}
+
 bool Driver::drawDataHits() {
     static const bool hits = std::getenv("APS5_NO_DRAW_DATA_HITS") == nullptr;
     return hits;
@@ -84,7 +89,7 @@ DrawKeySightings::DrawKeySightings(std::size_t keyCount) {
     bucketMask = buckets - 1;
 }
 
-bool DrawKeySightings::SeenBefore(std::uint64_t key) {
+bool DrawKeySightings::SeenBefore(std::uint64_t key, bool record) {
     auto mixed = key;
     mixed = (mixed ^ (mixed >> 30u)) * 0xbf58476d1ce4e5b9ull;
     mixed = (mixed ^ (mixed >> 27u)) * 0x94d049bb133111ebull;
@@ -92,35 +97,41 @@ bool DrawKeySightings::SeenBefore(std::uint64_t key) {
     const auto bucket = static_cast<std::size_t>(mixed) & bucketMask;
     auto* ways = keys.data() + bucket * Ways;
     if (std::find(ways, ways + filled[bucket], key) != ways + filled[bucket]) return true;
+    if (!record) return false;
     ways[next[bucket]] = key;
     next[bucket] = static_cast<std::uint8_t>((next[bucket] + 1u) % Ways);
     if (filled[bucket] < Ways) ++filled[bucket];
     return false;
 }
 
-bool Driver::admitDrawKey(std::uint64_t key, std::uint64_t shape) {
+bool Driver::admitDrawKey(std::uint64_t key, std::uint64_t shape, bool record) {
     std::lock_guard cacheLock(drawCacheMutex);
     if (drawCache.contains(key)) return true;
-    if (!drawKeySightings) drawKeySightings.emplace(drawCacheEntries() * DrawKeySightings::Ways);
-    bool seen = drawKeySightings->SeenBefore(key);
+    const auto seenBefore = [&](std::optional<DrawKeySightings>& sightings, std::uint64_t value) {
+        if (!sightings) {
+            if (!record) return false;
+            sightings.emplace(drawCacheEntries() * DrawKeySightings::Ways);
+        }
+        return sightings->SeenBefore(value, record);
+    };
+    bool seen = seenBefore(drawKeySightings, key);
     const auto& pending = drawRelocationPending;
     if (pending.key == key && pending.identity != 0) {
         if (pending.alias != 0) {
             const auto trial = drawRelocationTrials.find(pending.identity);
-            if (drawKeySightings->SeenBefore(pending.alias ^ 0x9e3779b97f4a7c15ull) && trial != drawRelocationTrials.end()) {
+            if (seenBefore(drawKeySightings, pending.alias ^ 0x9e3779b97f4a7c15ull) && trial != drawRelocationTrials.end()) {
                 auto& state = trial->second;
                 if (state.productive || state.hits != 0 || state.admissions < DrawRelocationTrial::ProbationAdmissions) {
-                    if (!state.productive && state.hits == 0) ++state.admissions;
+                    if (record && !state.productive && state.hits == 0) ++state.admissions;
                     seen = true;
                 }
             }
         } else if (!drawRelocations.contains(pending.identity)) {
-            if (drawKeySightings->SeenBefore(pending.identity ^ 0xc2b2ae3d27d4eb4full)) seen = true;
+            if (seenBefore(drawKeySightings, pending.identity ^ 0xc2b2ae3d27d4eb4full)) seen = true;
         }
     }
     if (seen || shape == 0 || drawShapes.contains(shape)) return seen;
-    if (!drawShapeSightings) drawShapeSightings.emplace(drawCacheEntries() * DrawKeySightings::Ways);
-    return drawShapeSightings->SeenBefore(shape);
+    return seenBefore(drawShapeSightings, shape);
 }
 
 void Driver::insertDrawEntry(std::uint64_t key, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::shared_ptr<const DrawDecode> decode, std::uint64_t shape, bool replaceShape) {

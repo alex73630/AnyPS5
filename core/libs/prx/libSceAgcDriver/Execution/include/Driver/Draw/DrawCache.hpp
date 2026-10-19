@@ -100,6 +100,7 @@ struct DrawEntryCounters {
     double keyUs = 0;
     std::uint64_t absentNewRegisters = 0, absentUserWords = 0, absentEvicted = 0, absentNeverInserted = 0, evictions = 0;
     std::array<std::uint64_t, 6> registerKeyMissChanges{};
+    std::uint64_t unloggedAdmits = 0;
     std::uint64_t differingSameRuns = 0, differingWords = 0, differingRunsChanged = 0;
     std::uint64_t dataHits = 0, dataStagesReused = 0, dataStagesCompiled = 0, dataVerified = 0;
     std::uint64_t dataUserRejected = 0, dataUserUnknown = 0, dataUserTailChanged = 0, dataUserEligible = 0;
@@ -113,7 +114,7 @@ class DrawKeySightings {
 public:
     static constexpr std::size_t Ways = 4;
     explicit DrawKeySightings(std::size_t keys);
-    bool SeenBefore(std::uint64_t key);
+    bool SeenBefore(std::uint64_t key, bool record = true);
 
 private:
     std::vector<std::uint64_t> keys;
@@ -134,6 +135,8 @@ struct StageCapture {
     ShaderRecompiler::SrtUserDataUse userDataUse;
     std::uint64_t userDataMask = ~std::uint64_t{0};
 };
+
+bool CompiledCapturesLogged(std::span<const StageCapture> captures, const std::vector<bool>& reused);
 
 struct RelocatableUserWord {
     std::uint32_t reg;
