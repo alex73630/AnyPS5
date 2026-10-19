@@ -854,6 +854,18 @@ void readTrackingTests(const Device& device, Recorder& recorder) {
     Require(Recorder::ReadCounts().hits[static_cast<std::size_t>(Kind::AddressBased)] >= 2, "address-based hits are not counted");
     recorder.Sync();
     Require(recorder.Idle() && !recorder.PendingReadOverlaps(0x20000, 0x1000, false), "noted ranges outlived their batch");
+    const auto shared = std::make_shared<const Recorder::ReadList>(Recorder::ReadList{{0x50000, 0x51000}});
+    recorder.NotePendingReadList(shared, Kind::AddressRead);
+    const auto readOnly = recorder.DescribePendingRead(0x50000, 4);
+    Require(readOnly && readOnly->open && readOnly->kind == Kind::AddressRead && recorder.PendingReadOverlaps(0x50000, 4), "a read-only lease lost its pending read");
+    Require(recorder.PendingWriterSerial(0x50000, 4) == 0, "a read-only lease counts as a writer");
+    recorder.NotePendingReadList(shared, Kind::AddressBased);
+    Require(recorder.PendingWriterSerial(0x50000, 4) == recorder.OpenSerial(), "a storing lease was deduplicated against a read-only lease");
+    recorder.Sync();
+    recorder.NotePendingReadList(shared, Kind::AddressRead);
+    recorder.NotePendingWrite(0x50000, 4);
+    Require(recorder.PendingWriterSerial(0x50000, 4) == recorder.OpenSerial(), "a read-only lease hid a noted write");
+    recorder.Sync();
 }
 
 Recorder::WriteRanges expectedWriteUnion(Recorder::WriteRanges ranges) {
@@ -11063,6 +11075,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--read-list-only") {
+            readTrackingTests(device, recorder);
             readListTests(device, recorder);
             std::cout << "Read list tests passed\n";
             return 0;
