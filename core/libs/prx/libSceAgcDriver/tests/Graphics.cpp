@@ -10643,7 +10643,7 @@ void packedReplaceBlendTests() {
             if (packing == ColorExportPacking::Float11_11_10) {
                 queue.context[0x31c] &= ~0x28000u;
                 const auto state = AgcDriver::Graphics::DecodeState(queue);
-                Require(state.packedBlend.control == blend && !state.blend.blendEnable && state.blend.colorWriteMask == 0u, "packed float blending did not move writes into the fragment shader");
+                Require(state.color.mergeBlend == blend && AgcDriver::Graphics::ExportTargetMerge(state).blendControl == blend && !state.blend.blendEnable && state.blend.colorWriteMask == 0u, "packed float blending did not move writes into the fragment shader");
             } else {
                 expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "color target is unsupported");
             }

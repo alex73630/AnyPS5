@@ -4085,7 +4085,10 @@ void verifyPointerChainImageTable() {
     });
     auto nonTableRequest = TableRequest(nonTableCode, userData);
     nonTableRequest.shader.codeAddress = 0x3a000u;
-    expectFailure([&] { static_cast<void>(GetResourcePlan(nonTableRequest)); }, "GetImageResource dword 0 is not a valid runtime value", "pointer chain image table: a phi with a non-table branch was planned as a table");
+    const auto nullArmPlan = GetResourcePlan(nonTableRequest);
+    require(nullArmPlan->info.images.size() == 1u && nullArmPlan->info.images[0].table == 0u, "pointer chain image table: a null pointer arm was not planned as a table");
+    const auto nullArmTable = CompileTable(nonTableRequest);
+    require(!nullArmTable.capture->snapshot.tables.tables.empty(), "pointer chain image table: a null pointer arm lost its captured table");
 
     auto armOffsetCode = code;
     armOffsetCode.erase(armOffsetCode.begin() + 14, armOffsetCode.begin() + 17);
@@ -4094,7 +4097,10 @@ void verifyPointerChainImageTable() {
     });
     auto armOffsetRequest = TableRequest(armOffsetCode, userData);
     armOffsetRequest.shader.codeAddress = 0x3b000u;
-    expectFailure([&] { static_cast<void>(GetResourcePlan(armOffsetRequest)); }, "GetImageResource dword 0 is not a valid runtime value", "pointer chain image table: a phi whose arms compute their own table offset was planned as a table");
+    const auto armOffsetPlan = GetResourcePlan(armOffsetRequest);
+    require(armOffsetPlan->info.images.size() == 1u && armOffsetPlan->info.images[0].table == 0u, "pointer chain image table: equivalent offsets computed on each phi arm were not planned as a table");
+    const auto armOffsetTable = CompileTable(armOffsetRequest);
+    require(armOffsetTable.capture->snapshot.tables.tables.at(0).codes == snapshot.codes, "pointer chain image table: equivalent offsets computed on each phi arm captured different records");
 }
 
 void verifyWaterfallImageTable() {

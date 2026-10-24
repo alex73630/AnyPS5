@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -43,8 +45,11 @@ constexpr char kLayerVersion23[] =
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAACwAAABAAAABAAAAAAQYAAAAAAAAAAAAAAAAAADTvzasAAAA5"
     "AAAABAAAAAkAAAAAAXhWNBIBAQE5MAAAAAA=";
 
-void Require(bool condition) {
-    if (!condition) std::abort();
+void Require(bool condition, const std::source_location location = std::source_location::current()) {
+    if (!condition) {
+        std::fprintf(stderr, "%s:%u: requirement failed\n", location.file_name(), location.line());
+        std::abort();
+    }
 }
 
 template <typename TRange>
@@ -814,7 +819,7 @@ int main() {
             Require(decoded.request.context.pixel->targetMerge == extended.context.pixel->targetMerge);
             Require(serializer.Serialize(decoded.request) == encoded);
             auto bytes = DecodeBase64(encoded);
-            Require(bytes[4] == 46u && bytes[7] == ((converted || blended) ? 128u : 0u));
+            Require(bytes[4] == 47u && bytes[7] == ((converted || blended) ? 128u : 0u));
             if (converted || blended) {
                 for (const bool trailing : {false, true}) {
                     auto invalid = bytes;
