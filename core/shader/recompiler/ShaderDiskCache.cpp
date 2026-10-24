@@ -1799,6 +1799,9 @@ private:
         std::lock_guard lock(specializedMutex);
         const auto found = specializedIndex.find(name);
         if (found != specializedIndex.end()) {
+            const auto previous = found->second->bytes;
+            if (bytes >= previous) specializedBytes.fetch_add(bytes - previous, std::memory_order_relaxed);
+            else specializedBytes.fetch_sub(previous - bytes, std::memory_order_relaxed);
             found->second->bytes = bytes;
             specializedRecords.splice(specializedRecords.end(), specializedRecords, found->second);
             return;

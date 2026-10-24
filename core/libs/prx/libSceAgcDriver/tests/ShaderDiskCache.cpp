@@ -3046,7 +3046,7 @@ std::vector<std::byte> boundedModuleKey(std::size_t index) {
 
 int runSpecializedBoundsProcess(std::string_view mode) {
     if (mode == "--specialized-cap-entries") setEnvironment("APS5_SPECIALIZED_DISK_CACHE_ENTRIES", "3");
-    if (mode == "--specialized-cap-bytes") setEnvironment("APS5_SPECIALIZED_DISK_CACHE_MAX_MIB", "1");
+    if (mode == "--specialized-cap-bytes" || mode == "--specialized-cap-rewrite") setEnvironment("APS5_SPECIALIZED_DISK_CACHE_MAX_MIB", "1");
     if (mode == "--specialized-cap-invalid") setEnvironment("APS5_SPECIALIZED_DISK_CACHE_ENTRIES", "three");
     if (mode == "--specialized-cap-off") setEnvironment("APS5_SPECIALIZED_DISK_CACHE_ENTRIES", "0");
     const auto stored = [&](std::size_t index) { return ShaderDiskCache::EntryDirectory() / ShaderDiskCache::SpecializedEntryName(boundedModuleKey(index)); };
@@ -3078,6 +3078,29 @@ int runSpecializedBoundsProcess(std::string_view mode) {
         ShaderDiskCache::Flush();
         for (std::size_t index = 0; index < 5u; ++index) require(onDisk(index) && loaded(index), "a bound that is not a decimal number did not fall back to the default" + counters("after storing five modules"));
         std::cout << "a bound that is not a decimal number was reported and the default kept all " << 5 << " modules\n";
+        return 0;
+    }
+    if (mode == "--specialized-cap-rewrite") {
+        auto large = sampleSpecializedModule();
+        std::vector<std::uint32_t> words(0x28000u, 0u);
+        words[0] = 0x07230203u;
+        large.spirv = SharedSpirv(words);
+        const auto big = std::make_shared<const ShaderDiskCache::SpecializedModule>(large);
+        ShaderDiskCache::StoreSpecialized(boundedModuleKey(0), big);
+        ShaderDiskCache::Flush();
+        ShaderDiskCache::StoreSpecialized(boundedModuleKey(0), module);
+        ShaderDiskCache::Flush();
+        ShaderDiskCache::StoreSpecialized(boundedModuleKey(1), big);
+        ShaderDiskCache::Flush();
+        require(onDisk(0) && onDisk(1) && loaded(0), "shrinking a specialized entry left its previous size charged" + counters("after a smaller replacement"));
+        require(ShaderDiskCache::Totals().specializedEvictions == 0u, "replacing an entry evicted modules that fit under the byte bound" + counters("after a smaller replacement"));
+        ShaderDiskCache::StoreSpecialized(boundedModuleKey(0), big);
+        ShaderDiskCache::Flush();
+        require(onDisk(0) && !onDisk(1), "growing a specialized entry did not evict the older module" + counters("after a larger replacement"));
+        require(ShaderDiskCache::Totals().specializedEvictions == 1u, "growing a specialized entry did not count exactly one eviction" + counters("after a larger replacement"));
+        ShaderDiskCache::SpecializedModule decoded;
+        require(ShaderDiskCache::LoadSpecialized(boundedModuleKey(0), decoded) && decoded.spirv.Words().size() == words.size(), "the larger replacement does not load whole");
+        std::cout << "specialized entry replacements update the byte bound for smaller and larger files\n";
         return 0;
     }
     if (mode == "--specialized-cap-bytes") {
@@ -3125,7 +3148,7 @@ void verifySpecializedBoundsAcrossProcesses(const char* self) {
         const std::string command = "\"" + std::string(self) + "\" " + mode;
         require(std::system(command.c_str()) == 0, std::string("the process ") + mode + " failed");
     };
-    for (const auto* mode : {"--specialized-cap-entries", "--specialized-cap-bytes", "--specialized-cap-invalid", "--specialized-cap-off"}) run(mode);
+    for (const auto* mode : {"--specialized-cap-entries", "--specialized-cap-bytes", "--specialized-cap-rewrite", "--specialized-cap-invalid", "--specialized-cap-off"}) run(mode);
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", own.string());
 }
 
