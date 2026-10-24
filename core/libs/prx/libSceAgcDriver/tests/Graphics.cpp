@@ -5146,6 +5146,10 @@ struct MockVulkan {
     std::map<VkGraphicsPipelineLibraryFlagsEXT, VkPipelineCreateFlags> libraryCreateFlags;
     std::map<VkGraphicsPipelineLibraryFlagsEXT, std::array<VkFormat, 2>> libraryDepthFormats;
     std::uint32_t pipelineCreateCount = 0;
+    std::uint32_t shaderModuleCreateCount = 0;
+    std::uint32_t failShaderModuleCountdown = 0;
+    VkGraphicsPipelineLibraryFlagsEXT failLibraryPart = 0;
+    std::set<VkShaderModule> shaderModules;
     std::vector<std::array<std::uint32_t, 3>> pipelineSpecializations;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
     std::vector<std::byte> lastPushConstants;
@@ -5388,6 +5392,9 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineC
     }
     const auto* library = static_cast<const VkGraphicsPipelineLibraryCreateInfoEXT*>(infos[0].pNext);
     Require(library != nullptr && library->sType == VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, "missing graphics pipeline library description");
+    for (std::uint32_t stage = 0; stage < infos[0].stageCount; ++stage)
+        Require(mock.shaderModules.contains(infos[0].pStages[stage].module), "a shader library used a missing or destroyed module");
+    if (mock.failLibraryPart == library->flags) return VK_ERROR_OUT_OF_HOST_MEMORY;
     mock.libraryLayouts[library->flags] = infos[0].layout;
     mock.libraryCreateFlags[library->flags] = infos[0].flags;
     const auto* rendering = static_cast<const VkPipelineRenderingCreateInfoKHR*>(library->pNext);
@@ -5403,13 +5410,19 @@ VKAPI_ATTR void VKAPI_CALL mockDestroyPipelineLayout(VkDevice, VkPipelineLayout,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockCreateShaderModule(VkDevice, const VkShaderModuleCreateInfo*, const VkAllocationCallbacks*, VkShaderModule* module) {
+    if (mock.failShaderModuleCountdown != 0 && --mock.failShaderModuleCountdown == 0) return VK_ERROR_OUT_OF_HOST_MEMORY;
     *module = makeHandle<VkShaderModule>();
+    ++mock.shaderModuleCreateCount;
+    mock.shaderModules.insert(*module);
     ++mock.live;
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL mockDestroyShaderModule(VkDevice, VkShaderModule module, const VkAllocationCallbacks*) {
-    if (module != VK_NULL_HANDLE) --mock.live;
+    if (module != VK_NULL_HANDLE) {
+        Require(mock.shaderModules.erase(module) == 1, "a shader module was destroyed twice");
+        --mock.live;
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockCreateComputePipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkComputePipelineCreateInfo* infos, const VkAllocationCallbacks*, VkPipeline* pipelines) {
@@ -8139,6 +8152,7 @@ void pipelineLibrarySetTests() {
         PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), makeHandle<VkDescriptorSetLayout>(), true, mainKey, fragmentKey};
         const auto prebuild = [&] { Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "graphics pipeline library prebuild was skipped"); };
         prebuild();
+        Require(mock.shaderModuleCreateCount == 2, "the first shader libraries did not create exactly their two modules");
         for (const auto& [part, flags] : mock.libraryCreateFlags) {
             const bool retained = (flags & VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT) != 0u;
             Require(retained == (optimize && std::getenv("APS5_NO_PIPELINE_LTO") == nullptr), "pipeline library retained optimization data that cannot be used or discarded data needed for linking");
@@ -8155,12 +8169,14 @@ void pipelineLibrarySetTests() {
         auto before = PipelineLibraryCountersOf(context.device).built;
         prebuild();
         Require(PipelineLibraryCountersOf(context.device).built == before, "identical shader libraries were rebuilt");
+        Require(mock.shaderModuleCreateCount == 2, "resident shader libraries recreated their modules");
         for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
             state.depth = DepthTarget{0x1000, 0x2000, {16, 16}, format, 1.0f, 0};
             prebuild();
             const auto after = PipelineLibraryCountersOf(context.device).built;
             Require(after[0] == before[0] && after[1] == before[1] && after[2] == before[2], "attachment format change rebuilt a vertex-input or shader library");
             Require(after[3] == before[3] + 1u, "attachment format change reused an incompatible output library");
+            Require(mock.shaderModuleCreateCount == 2, "an output library change recreated resident shader modules");
             for (const auto part : {VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT}) {
                 Require(mock.libraryDepthFormats.at(part) == std::array<VkFormat, 2>{VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED}, "shader library retained ignored attachment formats");
             }
@@ -8168,6 +8184,7 @@ void pipelineLibrarySetTests() {
             before = after;
         }
         for (std::uint32_t set = 0; set < 2; ++set) {
+            const auto modulesBefore = mock.shaderModuleCreateCount;
             if (set == 0) { ++mainKey[0]; resources.main = makeHandle<VkDescriptorSetLayout>(); }
             else { ++fragmentKey[0]; resources.fragment = makeHandle<VkDescriptorSetLayout>(); }
             prebuild();
@@ -8175,6 +8192,7 @@ void pipelineLibrarySetTests() {
             Require(after[0] == before[0] && after[3] == before[3], "descriptor layout change rebuilt interface libraries");
             Require(after[1] == before[1] + ((mask & (1u << set)) == 0u ? 1u : 0u), "pre-rasterization library reuse ignored descriptor set usage");
             Require(after[2] == before[2] + ((mask & (1u << set)) != 0u ? 1u : 0u), "fragment library reuse ignored descriptor set usage");
+            Require(mock.shaderModuleCreateCount == modulesBefore + 1u, "a descriptor layout change recreated an unaffected stage's module");
             before = after;
         }
         ShaderRecompiler::DescriptorBinding invalid{};
@@ -8183,6 +8201,25 @@ void pipelineLibrarySetTests() {
         expectFailure(prebuild, "descriptor set exceeds two slots");
         ClearPipelineLibraries(context.device);
         Require(mock.live == 0, "shader library tests leaked Vulkan objects");
+        Require(mock.shaderModules.empty(), "clearing shader libraries retained their modules");
+        fragment.bindings.pop_back();
+        mock.failLibraryPart = VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT;
+        expectFailure(prebuild, "vkCreateGraphicsPipelines library");
+        const auto retained = optimize && std::getenv("APS5_NO_PIPELINE_LTO") == nullptr ? 1u : 0u;
+        Require(PipelineLibraryCountersOf(context.device).modules == 2 && mock.shaderModules.size() == retained, "a failed library build lost module accounting or retained an unused module");
+        mock.failLibraryPart = 0;
+        prebuild();
+        Require(PipelineLibraryCountersOf(context.device).modules == 3 && PipelineLibraryCountersOf(context.device).built[1] == 1, "recovering a failed fragment library recreated the cached vertex module");
+        ClearPipelineLibraries(context.device);
+        Require(mock.live == 0 && mock.shaderModules.empty(), "shader libraries did not recover after a failed build");
+        mock.failShaderModuleCountdown = 2;
+        expectFailure(prebuild, "vkCreateShaderModule graphics");
+        const auto failed = PipelineLibraryCountersOf(context.device);
+        Require(failed.modules == 1 && failed.built[1] == 1 && failed.built[2] == 0 && mock.shaderModules.size() == retained, "failed shader module creation lost the preceding library or its ownership");
+        prebuild();
+        Require(PipelineLibraryCountersOf(context.device).modules == 2 && PipelineLibraryCountersOf(context.device).built[1] == 1, "recovering failed module creation rebuilt the resident vertex library");
+        ClearPipelineLibraries(context.device);
+        Require(mock.live == 0 && mock.shaderModules.empty(), "failed module creation leaked Vulkan objects");
     }
 }
 
@@ -12065,6 +12102,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--pipeline-library-clear-waits-for-build") {
             pipelineLibraryClearWaitsForBuildTests();
             std::cout << "pipeline library clear waits for active part builds\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--pipeline-library-lazy-modules") {
+            pipelineLibrarySetTests();
+            std::cout << "pipeline library cache hits avoid shader module creation\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--pipeline-store-lazy-buffer-pool") {

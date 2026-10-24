@@ -114,8 +114,9 @@ std::span<const VkDynamicState> PipelineLibraryDynamicStates() {
     return dynamicStates;
 }
 
-VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized, bool partsOnly, std::span<VkShaderModule> modules) {
+VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized, bool partsOnly, std::span<VkShaderModule> modules, const std::function<VkShaderModule(std::uint32_t)>& createModule) {
     Require(info.renderPass == VK_NULL_HANDLE && info.pDynamicState != nullptr, "pipeline library parts need dynamic rendering and the library dynamic states");
+    Require(!createModule || modules.size() == info.stageCount, "lazy pipeline modules need one owning slot per shader stage");
     const bool split = (layout.flags & VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT) != 0;
     Require(!split || (layout.setLayoutCount == 2u && layout.pSetLayouts != nullptr && ((keys.preRasterizationSets | keys.fragmentSets) & ~3u) == 0u), "split pipeline library layout requires two descriptor set slots and a valid mask");
     auto& store = Libraries();
@@ -154,15 +155,22 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
     const auto fullLayout = layoutFor(keys.layout, std::nullopt);
     const std::array<VkPipelineLayout, 4> partLayouts{VK_NULL_HANDLE, split ? layoutFor(keys.preRasterizationLayout, keys.preRasterizationSets) : fullLayout, split ? layoutFor(keys.fragmentLayout, keys.fragmentSets) : fullLayout, VK_NULL_HANDLE};
     std::vector<VkPipelineShaderStageCreateInfo> preRasterization;
-    const VkPipelineShaderStageCreateInfo* fragment = nullptr;
+    std::vector<std::uint32_t> preRasterizationStages;
+    std::optional<VkPipelineShaderStageCreateInfo> fragment;
+    std::uint32_t fragmentStage = 0;
     bool mesh = false;
     for (std::uint32_t index = 0; index < info.stageCount; ++index) {
         const auto& stage = info.pStages[index];
-        if (stage.stage == VK_SHADER_STAGE_FRAGMENT_BIT) fragment = &stage;
-        else preRasterization.push_back(stage);
+        if (stage.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+            fragment = stage;
+            fragmentStage = index;
+        } else {
+            preRasterization.push_back(stage);
+            preRasterizationStages.push_back(index);
+        }
         mesh |= stage.stage == VK_SHADER_STAGE_MESH_BIT_EXT;
     }
-    Require(fragment != nullptr && !preRasterization.empty(), "a pipeline built from libraries needs a fragment and a pre-rasterization stage");
+    Require(fragment.has_value() && !preRasterization.empty(), "a pipeline built from libraries needs a fragment and a pre-rasterization stage");
     constexpr std::array<VkGraphicsPipelineLibraryFlagsEXT, 4> flags{
         VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
         VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
@@ -221,7 +229,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             break;
         case VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT:
             create.stageCount = 1;
-            create.pStages = fragment;
+            create.pStages = &*fragment;
             create.pMultisampleState = info.pMultisampleState;
             create.pDepthStencilState = info.pDepthStencilState != nullptr ? info.pDepthStencilState : &dynamicDepth;
             break;
@@ -237,11 +245,34 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         // journal replay) run at once; a part another thread built meanwhile is kept, this one dropped.
         lock.unlock();
         VkResult created;
-        {
+        std::uint64_t createdModules = 0;
+        try {
+            if (createModule && create.stageCount != 0) {
+                PerformanceTimer modulesTiming("Vulkan.GraphicsPipelineLibrary.shader-modules");
+                const auto prepare = [&](VkPipelineShaderStageCreateInfo& stage, std::uint32_t index) {
+                    if (modules[index] == VK_NULL_HANDLE) {
+                        modules[index] = createModule(index);
+                        ++createdModules;
+                    }
+                    stage.module = modules[index];
+                };
+                if (part == 1) {
+                    for (std::size_t index = 0; index < preRasterization.size(); ++index) prepare(preRasterization[index], preRasterizationStages[index]);
+                } else if (part == 2) {
+                    prepare(*fragment, fragmentStage);
+                }
+            }
+            for (std::uint32_t stage = 0; stage < create.stageCount; ++stage)
+                Require(create.pStages[stage].module != VK_NULL_HANDLE, "a shader library stage has no module");
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
             created = PipelineCompilation{partTimers[part], source}.Complete(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &handle));
+        } catch (...) {
+            lock.lock();
+            device.counters.modules += createdModules;
+            throw;
         }
         lock.lock();
+        device.counters.modules += createdModules;
         Check(created, "vkCreateGraphicsPipelines library");
         if (const auto raced = cache.find(key); raced != cache.end()) {
             device.destroyPipeline(context.device, handle, nullptr);

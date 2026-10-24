@@ -10736,15 +10736,18 @@ void pipelineLibraryTests(const Device& device) {
     }
     const auto built = counters();
     Require(built.linked == 1 && built.built == std::array<std::uint64_t, 4>{1, 1, 1, 1}, "the first pipeline was not linked from four new libraries");
+    Require(built.modules == 2, "the first pipeline did not create its two shader modules");
     state.blends.front().blendEnable = VK_TRUE;
     state.blends.front().srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
     state.blends.front().dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     const auto blended = lookup();
     Require(blended != first && counters().built == std::array<std::uint64_t, 4>{1, 1, 1, 2}, "a blend change rebuilt more than the fragment output library");
+    Require(counters().modules == built.modules, "a blend change recreated cached shader modules");
     state.cullMode = VK_CULL_MODE_BACK_BIT;
     state.frontFace = VK_FRONT_FACE_CLOCKWISE;
     const auto culled = lookup();
     Require(culled != blended && counters().built == std::array<std::uint64_t, 4>{1, 1, 1, 2}, "a cull mode change rebuilt a library instead of setting dynamic state");
+    Require(counters().modules == built.modules, "linking cached libraries recreated shader modules");
     input.bindings.push_back({0, 16, VK_VERTEX_INPUT_RATE_VERTEX});
     input.attributes.push_back({0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0});
     static_cast<void>(lookup());
@@ -10827,6 +10830,7 @@ void pipelineLibraryTests(const Device& device) {
     WaitForOptimizedPipelines(context.device);
     const auto lto = std::getenv("APS5_NO_PIPELINE_LTO") == nullptr && context.pipelineLinkTimeOptimization;
     Require(counters().optimized == (lto ? counters().linked : 0u), "a linked pipeline was not optimized in the background");
+    Require(counters().modules == counters().built[1] + counters().built[2], "a shader module was created for a resident library part");
     Require(first->Optimized() == lto && culled->Optimized() == lto, "a pipeline did not switch to its optimized link");
     ClearCachedPipelines(context.device);
     Require(counters().linked == 0, "clearing the pipelines kept the device's libraries");

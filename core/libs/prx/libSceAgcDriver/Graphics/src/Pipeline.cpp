@@ -506,17 +506,15 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT meshSubgroup{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT, nullptr, 32u};
         for (std::uint32_t i = 0; i < shaders.size(); ++i) {
             const auto& shader = *shaders[i].program;
-            _modules[i] = CreateShaderModule(context, shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t), "vkCreateShaderModule graphics");
             const auto stage = VulkanStage(shaders[i].stage);
             stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             stages[i].stage = stage;
-            stages[i].module = _modules[i];
             stages[i].pName = "main";
             if (shaders[i].stage == ShaderRecompiler::ShaderStage::Mesh && context.meshWave32 && shader.hostSubgroupSize == 32u) stages[i].pNext = &meshSubgroup;
             specializations.emplace_back(shader);
             stages[i].pSpecializationInfo = specializations.back().Info();
         }
-        timing.Mark("shader_modules");
+        timing.Mark("shader_stage_setup");
         if (std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && !shader.program->stencilReferences.empty(); })) {
             for (std::size_t i = 0; i < shaders.size(); ++i) {
                 if (shaders[i].stage != ShaderRecompiler::ShaderStage::Vertex) continue;
@@ -624,6 +622,14 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         PipelineLibraryKeys keys;
         const char* fallback = nullptr;
         libraries = libraryKeys(keys, context, state, vertexInput, resources, shaders, fallback);
+        const auto createModule = [&](std::uint32_t index) {
+            const auto& shader = *shaders[index].program;
+            return CreateShaderModule(context, shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t), "vkCreateShaderModule graphics");
+        };
+        if (!libraries) {
+            PerformanceTimer modulesTiming("Vulkan.GraphicsPipeline.shader-modules");
+            for (std::uint32_t i = 0; i < shaders.size(); ++i) stages[i].module = _modules[i] = createModule(i);
+        }
         std::vector<VkDynamicState> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         if (state.stencilReplayReference) dynamicStates.push_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
         if (depthBounds) dynamicStates.push_back(VK_DYNAMIC_STATE_DEPTH_BOUNDS);
@@ -732,13 +738,13 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             return;
         }
         if (prebuilding) {
-            static_cast<void>(LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, true, _modules));
+            static_cast<void>(LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, true, _modules, createModule));
             for (const auto module : _modules) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
             _modules.clear();
             prebuilt = true;
             return;
         }
-        if (libraries) pipeline = LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, false, _modules);
+        if (libraries) pipeline = LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, false, _modules, createModule);
         else {
             PerformanceTimer monolithicTiming(fallback);
             auto pipelineCacheLock = context.LockPipelineCacheForUse();

@@ -42,7 +42,7 @@ struct OptimizedPipeline {
     void Schedule();
 };
 
-VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized = nullptr, bool partsOnly = false, std::span<VkShaderModule> modules = {});
+VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized = nullptr, bool partsOnly = false, std::span<VkShaderModule> modules = {}, const std::function<VkShaderModule(std::uint32_t)>& createModule = {});
 
 void WaitForOptimizedPipelines(VkDevice device);
 
@@ -53,6 +53,7 @@ unsigned PipelineLibraryWorkers();
 
 struct PipelineLibraryCounters {
     std::array<std::uint64_t, 4> built{};
+    std::uint64_t modules = 0;
     std::uint64_t linked = 0;
     std::uint64_t optimized = 0;
 };
