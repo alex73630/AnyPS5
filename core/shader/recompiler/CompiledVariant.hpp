@@ -4,6 +4,8 @@
 #include "Recompiler.hpp"
 #include "IntermediateRepresentation/IrMetadata/CompiledShaderInfo.hpp"
 #include "Optimization/include/Optimization/BindingAllocator.hpp"
+#include <cstddef>
+#include <vector>
 
 namespace ShaderRecompiler {
 
@@ -12,6 +14,7 @@ struct CompiledVariant {
     CompiledShaderInfo info;
     CompiledBindingLayout bindings;
     CompiledShaderArtifact artifact;
+    std::vector<std::byte> artifactIdentity;
 };
 
 }
