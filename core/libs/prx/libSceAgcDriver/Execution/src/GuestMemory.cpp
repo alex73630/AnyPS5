@@ -2202,7 +2202,7 @@ GpuLockStats& LockStats() {
 }
 
 bool GpuLockProfiled() {
-    static const bool profiled = std::getenv("APS5_PROFILE_DRAW") != nullptr && std::getenv("APS5_NO_LOCK_PROFILE") == nullptr;
+    static const bool profiled = (std::getenv("APS5_PROFILE_DRAW") != nullptr || std::getenv("APS5_PROFILE_GPU_LOCK") != nullptr) && std::getenv("APS5_NO_LOCK_PROFILE") == nullptr;
     return profiled;
 }
 

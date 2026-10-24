@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WorkerSampler.hpp"
@@ -231,10 +232,14 @@ void DrawFinisher::Settle() {
 
 void DrawFinisher::Drain() {
     if (OnFinisherThread()) return;
+    PerformanceTimer timing("DrawFinisher.Drain", true);
     if (Busy() && GuestMemory::GpuMutex().HeldByThisThread()) throw std::runtime_error("draw finisher drain under the GPU lock");
     SpinUntil(HandoffSpinWindow() * 2, [&] { return outstanding.load(std::memory_order_acquire) == 0; });
+    timing.Mark("spin");
     std::unique_lock lock(mutex);
+    timing.Mark("lock");
     if (!jobs.empty()) idle.wait(lock, [&] { return jobs.empty(); });
+    timing.Mark("wait");
     if (failure != nullptr) std::rethrow_exception(std::exchange(failure, nullptr));
 }
 

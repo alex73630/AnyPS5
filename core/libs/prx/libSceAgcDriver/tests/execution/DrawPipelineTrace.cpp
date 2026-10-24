@@ -56,8 +56,26 @@ int main(int argc, char** argv) {
             checked = true;
         };
         if (finisher) {
+            PerformanceTrace::BindThread("draw producer");
             DrawFinisher::Get().Enqueue(checkWorker);
             DrawFinisher::Get().Drain();
+            auto* trace = PerformanceTrace::Thread();
+            if (disabled) {
+                if (trace != nullptr) throw std::runtime_error("unconfigured finisher drain allocated a trace buffer");
+            } else {
+                if (trace == nullptr) throw std::runtime_error("finisher drain has no producer trace");
+                const auto snapshot = trace->Collect();
+                const auto measured = std::find_if(snapshot.counters.begin(), snapshot.counters.end(), [](const auto& counter) {
+                    return std::string_view(counter.scope) == "DrawFinisher.Drain" && counter.reason == nullptr && counter.timed;
+                });
+                if (measured == snapshot.counters.end() || measured->count != 1 || measured->length <= std::chrono::steady_clock::duration::zero())
+                    throw std::runtime_error("finisher drain duration is absent from the producer trace");
+                for (const auto* stage : {"spin", "lock", "wait"}) {
+                    if (std::none_of(snapshot.totals.begin(), snapshot.totals.end(), [&](const auto& event) {
+                        return event.scope != nullptr && std::string_view(event.scope) == "DrawFinisher.Drain" && event.stage != nullptr && std::string_view(event.stage) == stage;
+                    })) throw std::runtime_error("finisher drain phase is absent from the producer trace");
+                }
+            }
         } else {
             DrawPipeline::Queue0().Enqueue(checkWorker, {});
             DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Submission);

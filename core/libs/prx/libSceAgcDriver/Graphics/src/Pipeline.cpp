@@ -516,6 +516,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             specializations.emplace_back(shader);
             stages[i].pSpecializationInfo = specializations.back().Info();
         }
+        timing.Mark("shader_modules");
         if (std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && !shader.program->stencilReferences.empty(); })) {
             for (std::size_t i = 0; i < shaders.size(); ++i) {
                 if (shaders[i].stage != ShaderRecompiler::ShaderStage::Vertex) continue;
@@ -536,6 +537,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         layoutInfo.pushConstantRangeCount = dynamicRendering ? static_cast<std::uint32_t>(slots.size()) : pushStages != 0 ? 1 : 0;
         layoutInfo.pPushConstantRanges = dynamicRendering ? slots.data() : pushStages != 0 ? &push : nullptr;
         Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &layout), "vkCreatePipelineLayout graphics");
+        timing.Mark("pipeline_layout");
         std::vector<VkAttachmentDescription> colors;
         std::vector<VkAttachmentReference> references(state.blends.size(), VkAttachmentReference{VK_ATTACHMENT_UNUSED, attachmentLayout});
         for (std::uint32_t index = 0; index < state.colors.size(); ++index) {
@@ -723,7 +725,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         pipelineInfo.layout = layout;
         pipelineInfo.renderPass = renderPass;
         if (dynamicRendering) pipelineInfo.pNext = &rendering;
-        timing.Mark("modules_and_state");
+        timing.Mark("fixed_state");
         if (prebuilding && !libraries) {
             for (const auto module : _modules) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
             _modules.clear();
