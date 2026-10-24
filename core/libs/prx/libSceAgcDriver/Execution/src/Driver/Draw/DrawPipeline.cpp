@@ -169,6 +169,10 @@ void DrawFinisher::Enqueue(Job job, Pending held) {
     struct ReclaimStorage {};
     auto& reclaim = HostThreadLocal<std::vector<Job>, ReclaimStorage>();
     reclaim.clear();
+    struct ReleaseReclaim {
+        std::vector<Job>& held;
+        ~ReleaseReclaim() { held.clear(); }
+    } releaseReclaim{reclaim};
     std::unique_lock lock(mutex);
     if (!ran.empty()) std::swap(ran, reclaim);
     if (failure != nullptr) std::rethrow_exception(std::exchange(failure, nullptr));
@@ -295,6 +299,10 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     struct ReclaimStorage {};
     auto& reclaim = HostThreadLocal<std::vector<Item>, ReclaimStorage>();
     reclaim.clear();
+    struct ReleaseReclaim {
+        std::vector<Item>& held;
+        ~ReleaseReclaim() { held.clear(); }
+    } releaseReclaim{reclaim};
     const auto lockStart = profile || trace != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::unique_lock lock(mutex);
     if (!retired.empty()) std::swap(retired, reclaim);
