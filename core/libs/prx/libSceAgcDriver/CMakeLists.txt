@@ -2531,6 +2531,14 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_sparse_indirect_indices_unreadable PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test(NAME agc_driver_late_test_merge_split_counting_pixel COMMAND agc_driver_late_test_merge_split_tests --counting-pixel)
+    add_test(NAME agc_driver_late_test_merge_split_counting_vertex COMMAND agc_driver_late_test_merge_split_tests --counting-vertex)
+    set_tests_properties(agc_driver_late_test_merge_split_counting_pixel agc_driver_late_test_merge_split_counting_vertex PROPERTIES
+        ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_driver_late_test_merge_split_counting_pixel agc_driver_late_test_merge_split_counting_vertex PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     set_tests_properties(agc_driver_pixel_implicit_derivatives PROPERTIES TIMEOUT 30)
     foreach(mode IN ITEMS loop_guard transitions)
         add_test(NAME agc_driver_address_draw_reuse_${mode} COMMAND agc_driver_address_draw_reuse_tests --uncached)
