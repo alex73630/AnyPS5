@@ -848,7 +848,8 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(46u);
+    const bool extended = request.context.convertedSamples || (request.context.pixel.has_value() && request.context.pixel->packedBlend != PackedFloatBlend{});
+    writer.WriteU32(extended ? 0x8000002eu : 46u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -889,6 +890,15 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     writer.WriteBool(request.target.fusedExactArithmetic);
     writer.WriteBool(request.target.largePixelFunctionLdsBuffer);
     writer.WriteU32(request.target.pixelFunctionStorageDwords);
+    if (extended) {
+        writer.WriteBool(request.context.convertedSamples);
+        if (request.context.pixel.has_value()) {
+            const auto& blend = request.context.pixel->packedBlend;
+            writer.WriteU32(blend.control);
+            writer.WriteU32(blend.target);
+            for (const auto value : blend.constants) writer.WriteU32(std::bit_cast<std::uint32_t>(value));
+        }
+    }
     return base64Encode(buffer);
 }
 
@@ -896,7 +906,9 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     const std::string decoded = base64Decode(text);
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
-    const auto version = reader.ReadU32();
+    const auto encodedVersion = reader.ReadU32();
+    const bool extended = encodedVersion == 0x8000002eu;
+    const auto version = extended ? 46u : encodedVersion;
     if (version < 1u || version > 46u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
@@ -955,6 +967,16 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     if (version >= 45u) {
         result.request.target.largePixelFunctionLdsBuffer = reader.ReadBool();
         result.request.target.pixelFunctionStorageDwords = reader.ReadU32();
+    }
+    if (extended) {
+        result.request.context.convertedSamples = reader.ReadBool();
+        if (result.pixel.has_value()) {
+            auto& blend = result.pixel->packedBlend;
+            blend.control = reader.ReadU32();
+            blend.target = reader.ReadU32();
+            for (auto& value : blend.constants) value = std::bit_cast<float>(reader.ReadU32());
+            result.request.context.pixel = result.pixel;
+        }
     }
     if (version >= 21u && reader.Remaining() != 0u) throw std::runtime_error("RequestSerializer: unexpected trailing data");
     return result;

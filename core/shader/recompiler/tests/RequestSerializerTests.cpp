@@ -789,5 +789,48 @@ int main() {
         Require(!serializer.Deserialize(EncodeBase64(bytes)).request.target.fusedExactArithmetic);
     }
 
+    for (const bool converted : {false, true}) {
+        for (const bool blended : {false, true}) {
+            ShaderRecompiler::RecompileRequest extended{};
+            extended.context.convertedSamples = converted;
+            extended.context.pixel = ShaderRecompiler::ShaderPixelStageInfo{};
+            extended.context.pixel->targetMerge.mask = 0x3210u;
+            if (blended) extended.context.pixel->packedBlend = {0x65040504u, 3u, {0.125f, 0.25f, 0.5f, 1.0f}};
+            const auto encoded = serializer.Serialize(extended);
+            const auto decoded = serializer.Deserialize(encoded);
+            Require(decoded.request.context.convertedSamples == converted);
+            Require(decoded.request.context.pixel->packedBlend == extended.context.pixel->packedBlend);
+            Require(decoded.request.context.pixel->targetMerge == extended.context.pixel->targetMerge);
+            Require(serializer.Serialize(decoded.request) == encoded);
+            auto bytes = DecodeBase64(encoded);
+            Require(bytes[4] == 46u && bytes[7] == ((converted || blended) ? 128u : 0u));
+            if (converted || blended) {
+                for (const bool trailing : {false, true}) {
+                    auto invalid = bytes;
+                    if (trailing) invalid.push_back(0u);
+                    else invalid.pop_back();
+                    bool rejected = false;
+                    try {
+                        static_cast<void>(serializer.Deserialize(EncodeBase64(invalid)));
+                    } catch (const std::exception&) {
+                        rejected = true;
+                    }
+                    Require(rejected);
+                }
+                bytes[7] = 0u;
+                bool rejected = false;
+                try {
+                    static_cast<void>(serializer.Deserialize(EncodeBase64(bytes)));
+                } catch (const std::exception&) {
+                    rejected = true;
+                }
+                Require(rejected);
+            }
+        }
+    }
+    ShaderRecompiler::RecompileRequest convertedOnly{};
+    convertedOnly.context.convertedSamples = true;
+    const auto convertedReplay = serializer.Deserialize(serializer.Serialize(convertedOnly));
+    Require(convertedReplay.request.context.convertedSamples && !convertedReplay.request.context.pixel.has_value());
     return 0;
 }
