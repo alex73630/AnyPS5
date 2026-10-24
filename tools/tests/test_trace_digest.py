@@ -672,6 +672,27 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("summary file not found", error.getvalue())
 
+    def test_thread_filter_removes_other_tracks_counters_and_losses(self):
+        events = EVENTS + [
+            {"ph": "C", "cat": "cache", "name": "Resources.hit", "ts": 1000, "tid": tid, "args": {"calls": tid}}
+            for tid in (1, 2)
+        ] + [
+            {"ph": "i", "cat": "phase_time", "name": "Resources.build", "ts": 1000, "tid": tid,
+             "args": {"calls": 1, "ns": 1000 * tid}}
+            for tid in (1, 2)
+        ] + [
+            {"ph": "i", "name": "cache counters full", "ts": 1000, "tid": 2, "args": {"calls_lost": 1}},
+            {"ph": "i", "name": "trace buffer full", "ts": 1000, "tid": 2, "args": {"events_lost": 1}},
+        ]
+        trace = trace_digest.Trace(events)
+        trace.select_threads(["queue worker 0x0"])
+        result = trace_digest.digest(trace)
+        self.assertTrue(result["counter_data_complete"])
+        self.assertTrue(result["slice_data_complete"])
+        self.assertEqual(sum(item["calls"] for item in result["cache_calls"]), 1)
+        self.assertEqual(result["frame_details"][0]["measured_phases"],
+                         [{"thread": "queue worker 0x0", "name": "Resources.build", "calls": 1, "ms": 0.001}])
+
     def test_thread_filter_keeps_frame_bounds_and_capture_summary(self):
         command = [sys.executable, trace_digest.__file__, str(self.trace)]
         result = subprocess.run([*command, "--thread", "queue worker 0x0", "--json"], capture_output=True, text=True)

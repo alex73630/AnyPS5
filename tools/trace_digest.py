@@ -96,6 +96,10 @@ class Trace:
         self.slices = {tid: slices for tid, slices in self.slices.items() if tid in selected}
         self.folded = {tid: value for tid, value in self.folded.items() if tid in selected}
         self.batched = [entry for entry in self.batched if entry[0] in selected]
+        self.counters = [entry for entry in self.counters if entry[1] in selected]
+        self.measurements = [entry for entry in self.measurements if entry[1] in selected]
+        self.counter_losses = [entry for entry in self.counter_losses if entry[1] in selected]
+        self.slice_losses = [entry for entry in self.slice_losses if entry[1] in selected]
 
     def name(self, tid):
         return self.threads.get(tid, f"tid {tid}")
