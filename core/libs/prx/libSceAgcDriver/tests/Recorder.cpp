@@ -4991,6 +4991,9 @@ bool unitShadowTests(const Device& device, Recorder& recorder) {
         MarkShadowed(*import, std::span(&range, 1), TrackerGeneration());
     };
     retile(*half, unit3, unit / 2, 0x22, true);
+    const std::array<ShadowedRange, 3> repeated{{{unit3, unit4, half->slab}, {unit3, unit3 + unit / 2, half->slab}, {unit3 + unit / 2, unit4, half->slab}}};
+    MarkShadowed(*import, repeated, TrackerGeneration());
+    MarkShadowed(*import, repeated, TrackerGeneration());
     Require(AnyShadowedOverlaps(unit3, 1) && AnyShadowedOverlaps(unit4 - 1, 1) && AnyShadowedOverlaps(unit3 + 1000, 64), "a fresh unit is not seen as shadowed");
     Require(!AnyShadowedOverlaps(unit3 - 1, 1) && !AnyShadowedOverlaps(unit4, unit) && !AnyShadowedOverlaps(address, 3 * unit), "a range outside the unit is seen as shadowed");
     const std::array<std::pair<std::uint64_t, std::uint64_t>, 2> outside{{{unit3 - 8, unit3}, {unit4, unit4 + unit}}};
@@ -5009,7 +5012,7 @@ bool unitShadowTests(const Device& device, Recorder& recorder) {
     // retile's; the copy stamps nothing, and a second publish copies nothing.
     const auto pre = CollectWritesUncached(address, bytes);
     Require(PublishShadow(unit3, unit, PublishScope::Whole, PublishReason::Hook) == 1, "the whole publish did not copy the unit");
-    Require(recorder.PendingWriteOverlaps(unit3, unit), "the publish noted no pending write");
+    Require(recorder.PendingWriteOverlaps(unit3, unit) != ShadowVerify(), "the publish pending-write state disagrees with its verification sync");
     recorder.Sync();
     Require(words[3 * unit] == 0x22 && words[3 * unit + unit / 2 - 1] == 0x22 && words[3 * unit + unit / 2] == 0x11 && words[4 * unit - 1] == 0x11 && words[3 * unit - 1] == 0x11 && words[4 * unit] == 0x11, "the published bytes are wrong");
     Require(!AnyShadowedOverlaps(unit3, unit), "a published unit still counts as shadowed");

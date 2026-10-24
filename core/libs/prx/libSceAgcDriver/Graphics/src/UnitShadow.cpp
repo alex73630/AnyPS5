@@ -721,6 +721,7 @@ void MarkShadowed(const HostImport& import, std::span<const ShadowedRange> range
         const auto shadow = find(registry, import);
         if (shadow == nullptr) return;
         const auto present = Recorder::Presents();
+        std::uint32_t marked = 0;
         for (const auto& [begin, end, slab] : ranges) {
             if (end <= begin) continue;
             bytes += end - begin;
@@ -732,12 +733,18 @@ void MarkShadowed(const HostImport& import, std::span<const ShadowedRange> range
                     ++lost;
                     continue;
                 }
+                if (!shadow->Live(unit)) ++marked;
                 shadow->generation[unit] = generation;
                 shadow->published[unit] = 0;
                 current->lastUse = present;
             }
         }
-        shadow->Recount();
+        shadow->liveUnits += marked;
+        if (ShadowVerify()) {
+            const auto expected = shadow->liveUnits;
+            shadow->Recount();
+            Require(shadow->liveUnits == expected, "marking shadow units lost the live-unit count");
+        }
     }
     if (lost != 0) {
         Stats().slabLost.fetch_add(lost, std::memory_order_relaxed);
