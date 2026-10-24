@@ -1702,7 +1702,7 @@ void noteStalePlane(std::uint64_t begin, std::uint64_t end);
 void bindSurface(const Context& context, DepthSurface& surface, const DepthTarget& target, bool created, bool cleared, VkImageAspectFlags htileCleared, bool depthWritten) {
     surface.retired = false;
     const auto owner = depthOwners().find({context.device, target.address});
-    const bool inherits = owner != depthOwners().end() && owner->second.surface.active->load(std::memory_order_acquire) && !owner->second.surface.retired;
+    const bool inherits = owner != depthOwners().end() && owner->second.surface->active->load(std::memory_order_acquire) && !owner->second.surface->retired;
     surface.clearDepth = target.clearDepth;
     surface.clearStencil = target.clearStencil;
     takePlanes(surface, created, htileCleared | (cleared ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u));
@@ -2674,6 +2674,7 @@ namespace {
 std::vector<LayeredSlice> layeredSlices(const Context& context, const LayeredDepthStorage& storage) {
     const auto& base = storage.base;
     std::vector<LayeredSlice> slices;
+    const auto& list = surfaces();
     for (std::uint32_t layer = storage.firstLayer; layer < storage.layers; ++layer) {
         const auto address = base.address + static_cast<std::uint64_t>(layer) * storage.layerPitchBytes;
         const auto slice = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) { return surface->context.device == context.device && !surface->retired && surface->target.address == address && surface->target.extent.width == base.extent.width && surface->target.extent.height == base.extent.height && surface->target.format == base.format && surface->target.samples == 1; });
