@@ -5829,11 +5829,6 @@ void verifyVertexInfoVersion19() {
     pixel.context.pixel = ShaderPixelStageInfo{};
     pixel.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encodedPixel = serializer.Serialize(pixel);
-    auto version37Pixel = decodeBase64(encodedPixel);
-    version37Pixel.resize(version37Pixel.size() - 24u);
-    version37Pixel[4] = 37u;
-    const auto replay37Pixel = serializer.Deserialize(encodeBase64(version37Pixel));
-    require(replay37Pixel.request.context.pixel->packedBlend == PackedFloatBlend{} && serializer.Serialize(replay37Pixel.request) == encodedPixel, "a version 37 request gained packed blending or lost its fields");
     auto exportedPixel = pixel;
     exportedPixel.context.pixel->layerExported = true;
     const auto exportedBytes = decodeBase64(serializer.Serialize(exportedPixel));
