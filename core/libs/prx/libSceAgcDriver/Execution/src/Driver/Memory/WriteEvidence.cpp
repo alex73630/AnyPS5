@@ -205,7 +205,7 @@ ShaderMemory::PendingWrite Driver::classifyPendingWrite(std::uint64_t address, s
 }
 
 ShaderMemory::PendingWrite Driver::queryPendingWrite(std::uint64_t address, std::size_t bytes, std::span<std::byte> known) {
-    if (DrawPipeline::Active()) {
+    if (DrawPipeline::Active() || DrawFinisher::OnFinisherThread()) {
         auto& pipeline = DrawPipeline::Queue0();
         if (pipeline.Busy() && pipeline.Overlaps(address, bytes)) pipeline.Drain(DrawPipeline::DrainReason::Capture);
     }
@@ -216,7 +216,7 @@ ShaderMemory::PendingWrite Driver::queryPendingWrite(std::uint64_t address, std:
 }
 
 ShaderMemory::PendingWrite Driver::QueryPendingSpan(std::uint64_t address, std::size_t bytes, std::span<std::byte> known) {
-    if (DrawPipeline::Active()) {
+    if (DrawPipeline::Active() || DrawFinisher::OnFinisherThread()) {
         auto& pipeline = DrawPipeline::Queue0();
         if (pipeline.Busy() && pipeline.Overlaps(address, bytes)) return ShaderMemory::PendingWrite::Sync;
     }

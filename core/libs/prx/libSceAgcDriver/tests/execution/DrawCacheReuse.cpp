@@ -268,8 +268,9 @@ void CaptureOnlyWaitsForTheWordsItReads() {
         Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
         Require(sceAgcDriverSubmitDcb(&packet) == 0, "the pending capture submission failed");
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (DrawPipeline::QueuedItems() < 2 && DrawPipeline::DrainRequestsByOpcode(0x100) == before && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        const bool queued = DrawPipeline::QueuedItems() >= 2;
+        const auto drawQueued = [&] { return pipeline.Overlaps(reinterpret_cast<std::uint64_t>(ColorMemory.data()), ColorMemory.size()); };
+        while (!drawQueued() && DrawPipeline::DrainRequestsByOpcode(0x100) == before && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const bool queued = drawQueued();
         const bool drained = DrawPipeline::DrainRequestsByOpcode(0x100) > before;
         released->store(true, std::memory_order_release);
         AgcDriverWaitIdle_nid_postfix();
