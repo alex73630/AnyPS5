@@ -371,6 +371,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_PROFILE_PIPELINE_COMPILES` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/PipelineCache.cpp` | unset | logs native pipeline compilation kind, source and duration without enabling draw profiling |
 | `APS5_PROFILE_GPU` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | records the GPU time of recorded work by key from batch timestamps |
 | `APS5_PROFILE_GPU_DRAWS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` | unset | records GPU time per draw by guest fragment or pre-rasterization shader entry; requires `APS5_PROFILE_GPU` and raises the per-batch timing capacity to 8192 |
+| `APS5_PROFILE_GPU_LOCK` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` | unset | records GPU mutex hold and wait statistics without enabling draw profiling or disabling the draw finisher |
 | `APS5_REGISTRATION_WORD_LIMIT` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` | 200000 | maximum SPIR-V words in a registration module; larger shaders use descriptor-specialized variants; accepts unsigned 32-bit values |
 | `APS5_REAP_EACH_PACKET` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/DeferredLabels.cpp` |  | reaps deferred labels after every packet |
 | `APS5_RELEASE_ON_UNLOCK` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | destroys deferred batches on the unlocking thread instead of a release thread |
