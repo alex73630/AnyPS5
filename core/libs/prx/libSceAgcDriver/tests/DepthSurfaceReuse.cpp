@@ -510,18 +510,18 @@ void TestLayeredRetirement(Context context) {
     context.limits.maxFramebufferLayers = 8;
     DepthTarget target{0xb0000000, 0xb1000000, {256, 256}, VK_FORMAT_D32_SFLOAT_S8_UINT, 1.0f, 0};
     target.lastSlice = 1;
-    const auto view = DepthSurfaceView(context, target, 2);
+    const auto view = DepthSurfaceView(context, target, true, 2);
     const auto image = imageViews.at(view).image;
     const auto bytes = DepthSliceBytes(target.extent, 4u);
     RetireDepthSurfaces(context.device, target.address + bytes, bytes);
     const auto released = DepthSurfacesReleased();
     DepthSurfaceView(context, {0xb2000000, 0, target.extent, VK_FORMAT_D32_SFLOAT, 1.0f, 0});
     Require(DepthSurfacesReleased() == released, "a retired slice referenced by a layered group must not be released");
-    Require(DepthSurfaceView(context, target, 2) == view, "rebinding a layered group must retain its retired slice");
+    Require(DepthSurfaceView(context, target, true, 2) == view, "rebinding a layered group must retain its retired slice");
     Require(std::find(destroyedImages.begin(), destroyedImages.end(), image) == destroyedImages.end(), "rebinding a layered group must preserve its image");
     auto subset = target;
     subset.firstSlice = subset.lastSlice = 1;
-    const auto subsetView = DepthSurfaceView(context, subset, 1);
+    const auto subsetView = DepthSurfaceView(context, subset, true, 1);
     Require(imageViews.at(subsetView).image == image, "a subset view must retain the containing group image after retirement");
     ClearDepthSurfaces(context.device);
 }
@@ -551,7 +551,7 @@ void RunDepthSurfaceReuseTests() {
         target.firstSlice = 3;
         target.lastSlice = 6;
         const auto before = createdImages.size();
-        const auto whole = DepthSurfaceView(layered, target, 4);
+        const auto whole = DepthSurfaceView(layered, target, true, 4);
         const auto image = imageViews.at(whole).image;
         Require(createdImages.size() == before + 1u, "a layered depth target must allocate one image");
         const auto subset = [&](std::uint32_t first, std::uint32_t count) {
@@ -565,13 +565,13 @@ void RunDepthSurfaceReuseTests() {
         imageCopies.clear();
         for (const auto [first, count] : {std::pair{0u, 2u}, {1u, 3u}, {2u, 2u}}) {
             const auto part = subset(first, count);
-            const auto view = DepthSurfaceView(layered, part, count);
+            const auto view = DepthSurfaceView(layered, part, true, count);
             const auto& info = imageViews.at(view);
             Require(info.image == image && info.subresourceRange.baseArrayLayer == first && info.subresourceRange.layerCount == count, "a contained depth range must view the original image layers");
             Require(info.subresourceRange.aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT), "a contained depth view must preserve both aspects");
-            Require(DepthSurfaceView(layered, part, count) == view, "a contained depth view must remain cached");
+            Require(DepthSurfaceView(layered, part, true, count) == view, "a contained depth view must remain cached");
         }
-        Require(DepthSurfaceView(layered, target, 4) == whole, "binding a subset must preserve the complete array view");
+        Require(DepthSurfaceView(layered, target, true, 4) == whole, "binding a subset must preserve the complete array view");
         Require(createdImages.size() == before + 1u && imageCopies.empty(), "switching between contained depth views must neither allocate nor copy images");
         for (std::uint32_t change = 0; change < 3u; ++change) {
             auto metadata = subset(0u, 3u);
@@ -579,21 +579,21 @@ void RunDepthSurfaceReuseTests() {
             if (change == 1u) metadata.htileStencil = true;
             if (change == 2u) metadata.htileDepthOnly = true;
             const auto allocations = createdImages.size();
-            const auto view = DepthSurfaceView(layered, metadata, 3);
+            const auto view = DepthSurfaceView(layered, metadata, true, 3);
             Require(imageViews.at(view).image != image && createdImages.size() == allocations + 1u, "different HTILE metadata must not reuse an exact or containing depth array");
-            Require(DepthSurfaceView(layered, metadata, 3) == view, "a depth array with matching HTILE metadata must retain its view");
+            Require(DepthSurfaceView(layered, metadata, true, 3) == view, "a depth array with matching HTILE metadata must retain its view");
         }
         auto changedStencil = subset(1u, 2u);
         changedStencil.stencilAddress += 0x1000000;
-        Require(imageViews.at(DepthSurfaceView(layered, changedStencil, 2)).image != image, "a different stencil pairing must not reuse a containing depth array");
+        Require(imageViews.at(DepthSurfaceView(layered, changedStencil, true, 2)).image != image, "a different stencil pairing must not reuse a containing depth array");
         auto changedExtent = subset(1u, 2u);
         changedExtent.extent.width /= 2u;
-        Require(imageViews.at(DepthSurfaceView(layered, changedExtent, 2)).image != image, "a different extent must not reuse a containing depth array");
+        Require(imageViews.at(DepthSurfaceView(layered, changedExtent, true, 2)).image != image, "a different extent must not reuse a containing depth array");
         auto changedFormat = subset(1u, 2u);
         changedFormat.format = VK_FORMAT_D16_UNORM_S8_UINT;
-        Require(imageViews.at(DepthSurfaceView(layered, changedFormat, 2)).image != image, "a different format must not reuse a containing depth array");
+        Require(imageViews.at(DepthSurfaceView(layered, changedFormat, true, 2)).image != image, "a different format must not reuse a containing depth array");
         auto extendsPast = subset(3u, 2u);
-        Require(imageViews.at(DepthSurfaceView(layered, extendsPast, 2)).image != image, "a partially overlapping range must not exceed a containing depth image");
+        Require(imageViews.at(DepthSurfaceView(layered, extendsPast, true, 2)).image != image, "a partially overlapping range must not exceed a containing depth image");
         ClearDepthSurfaces(layered.device);
     }
     constexpr std::uint64_t depth32 = 0x40000000;
