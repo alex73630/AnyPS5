@@ -26,7 +26,7 @@ std::atomic<std::uint64_t> pipelineBuildsReady{0};
 std::atomic<std::uint64_t> pipelineBuildsFailed{0};
 
 bool profiling() {
-    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr || std::getenv("APS5_PROFILE_PIPELINE_COMPILES") != nullptr;
     return profile;
 }
 
