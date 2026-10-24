@@ -108,13 +108,30 @@ Key Combined(const Key& part, const Key& context) {
     return key;
 }
 
+Key partLibraryKey(const PipelineLibraryKeys& keys, std::size_t part, std::uint32_t viewMask) {
+    if (part == 0) return Combined(keys.vertexInput, {});
+    if (part == 3) return Combined(keys.fragmentOutput, keys.renderPass);
+    const auto bytes = std::as_bytes(std::span(&viewMask, 1));
+    const Key viewKey(bytes.begin(), bytes.end());
+    return part == 1 ? Combined(keys.preRasterization, Combined(keys.preRasterizationLayout, viewKey)) : Combined(keys.fragmentShader, Combined(keys.fragmentLayout, viewKey));
+}
+
+}
+
+bool PipelineShaderLibrariesResident(VkDevice device, const PipelineLibraryKeys& keys, std::uint32_t viewMask) {
+    const auto preRasterization = partLibraryKey(keys, 1, viewMask);
+    const auto fragment = partLibraryKey(keys, 2, viewMask);
+    auto& store = Libraries();
+    std::lock_guard lock(store.mutex);
+    const auto found = store.devices.find(device);
+    return found != store.devices.end() && found->second.parts[1].contains(preRasterization) && found->second.parts[2].contains(fragment);
 }
 
 std::span<const VkDynamicState> PipelineLibraryDynamicStates() {
     return dynamicStates;
 }
 
-VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized, bool partsOnly, std::span<VkShaderModule> modules, const std::function<VkShaderModule(std::uint32_t)>& createModule) {
+VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized, bool partsOnly, std::span<VkShaderModule> modules, const std::function<VkShaderModule(std::uint32_t)>& createModule, bool shadersOnly) {
     Require(info.renderPass == VK_NULL_HANDLE && info.pDynamicState != nullptr, "pipeline library parts need dynamic rendering and the library dynamic states");
     Require(!createModule || modules.size() == info.stageCount, "lazy pipeline modules need one owning slot per shader stage");
     const bool split = (layout.flags & VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT) != 0;
@@ -177,29 +194,22 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
     };
-    const std::array<const Key*, 4> partKeys{&keys.vertexInput, &keys.preRasterization, &keys.fragmentShader, &keys.fragmentOutput};
     constexpr std::array<const char*, 4> partTimers{
         "Vulkan.GraphicsPipelineLibrary.vertex-input",
         "Vulkan.GraphicsPipelineLibrary.pre-rasterization",
         "Vulkan.GraphicsPipelineLibrary.fragment-shader",
         "Vulkan.GraphicsPipelineLibrary.fragment-output",
     };
-    const auto* source = PipelineJournalReplaying() ? "journal" : partsOnly ? "registration" : "draw";
-    const Key none;
+    const auto* source = PipelineJournalReplaying() ? "journal" : partsOnly ? (shadersOnly ? "finisher" : "registration") : "draw";
     VkPipelineRenderingCreateInfoKHR shaderRendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
     shaderRendering.viewMask = rendering.viewMask;
-    const auto viewBytes = std::as_bytes(std::span(&shaderRendering.viewMask, 1));
-    const Key viewKey(viewBytes.begin(), viewBytes.end());
-    const auto preRasterizationContext = Combined(keys.preRasterizationLayout, viewKey);
-    const auto fragmentContext = Combined(keys.fragmentLayout, viewKey);
-    const std::array<const Key*, 4> contextKeys{&none, &preRasterizationContext, &fragmentContext, &keys.renderPass};
     VkPipelineDepthStencilStateCreateInfo dynamicDepth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     static const bool backgroundLinking = std::getenv("APS5_NO_PIPELINE_LTO") == nullptr;
     const bool optimize = backgroundLinking && context.pipelineLinkTimeOptimization;
     std::vector<VkPipeline> libraries;
     for (std::size_t part = 0; part < flags.size(); ++part) {
-        if (part == 0 && mesh) continue;
-        const auto key = Combined(*partKeys[part], *contextKeys[part]);
+        if ((part == 0 && mesh) || (partsOnly && shadersOnly && part != 1 && part != 2)) continue;
+        const auto key = partLibraryKey(keys, part, rendering.viewMask);
         auto& cache = device.parts[part];
         if (const auto found = cache.find(key); found != cache.end()) {
             libraries.push_back(found->second);

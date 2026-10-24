@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include <set>
+#include <optional>
 
 namespace AgcDriver::Graphics {
 
@@ -43,7 +44,8 @@ public:
     Pipeline(const Context& context, const State& state, const VertexInputLayout& vertexInput, const ShaderResources& resources, std::span<const CompiledShader> shaders, VkImageLayout attachmentLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     Pipeline(const Context& context, const State& state, const VertexInputLayout& vertexInput, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders, VkImageLayout attachmentLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     ~Pipeline();
-    static bool Prebuild(const Context& context, const State& state, const VertexInputLayout& vertexInput, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders);
+    static std::optional<bool> ShaderLibrariesResident(const Context& context, const State& state, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders);
+    static bool Prebuild(const Context& context, const State& state, const VertexInputLayout& vertexInput, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders, bool shadersOnly = false);
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
     VkPipelineLayout Layout() const;

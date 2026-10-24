@@ -1095,6 +1095,18 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
         }
     }
     if (pipelined && !drawParameters.indirect && (tail.queue == nullptr || deferredLabels().labels.empty())) {
+        static const bool warmLibraries = std::getenv("APS5_PREBUILD_DRAW_LIBRARIES") != nullptr;
+        if (warmLibraries && recipe == nullptr && drawParameters.indexCount != 0 && drawParameters.instanceCount != 0 && DrawFinisher::OnFinisherThread() && !GuestMemory::GpuMutex().HeldByThisThread()) {
+            try {
+                const auto current = device.Load();
+                static_cast<void>((current != nullptr ? current : localDevice)->WarmDrawLibraries(graphics, stages));
+            } catch (const std::exception& error) {
+                PerformanceTrace::Count("DrawLibraryPrebuild", "failed");
+                static thread_local std::unordered_set<std::string> failures;
+                if (failures.emplace(error.what()).second) AgcDriver::ProfilePrint_nid_no_patch("[draw-library-prebuild] skipped: %s\n", error.what());
+            }
+            timing.Mark("draw_library_prebuild");
+        }
         phaseTiming.Phase(DrawRowVectors);
         auto writes = drawWriteRanges(graphics, stages);
         const auto commitQueue = submission.queue;

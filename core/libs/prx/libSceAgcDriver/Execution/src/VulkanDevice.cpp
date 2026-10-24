@@ -4095,6 +4095,22 @@ bool VulkanDevice::PrebuildGraphicsLibraries(const Graphics::ShaderStages& stage
     return Graphics::Pipeline::Prebuild(context, state, Graphics::VertexInputLayout{}, layouts.View(), group);
 }
 
+bool VulkanDevice::WarmDrawLibraries(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
+    PerformanceTimer timing("Vulkan.DrawLibraryPrebuild");
+    const auto context = graphicsContext();
+    const auto outcome = [](const char* name, bool ready) {
+        PerformanceTrace::Count("DrawLibraryPrebuild", name);
+        return ready;
+    };
+    if (!context.graphicsPipelineLibrary || context.descriptorCache == nullptr) return outcome("unsupported", false);
+    const auto layouts = Graphics::DescribeSetLayouts(context, shaders);
+    const auto resident = Graphics::Pipeline::ShaderLibrariesResident(context, graphics, layouts.View(), shaders);
+    if (!resident.has_value()) return outcome("unsupported", false);
+    if (*resident) return outcome("resident", true);
+    const bool built = Graphics::Pipeline::Prebuild(context, graphics, Graphics::VertexInputLayout{}, layouts.View(), shaders, true);
+    return outcome(built ? "warmed" : "unsupported", built);
+}
+
 void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipe) {
     startJournalReplay();
     for (const auto& shader : shaders) {

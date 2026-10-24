@@ -42,7 +42,9 @@ struct OptimizedPipeline {
     void Schedule();
 };
 
-VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized = nullptr, bool partsOnly = false, std::span<VkShaderModule> modules = {}, const std::function<VkShaderModule(std::uint32_t)>& createModule = {});
+VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized = nullptr, bool partsOnly = false, std::span<VkShaderModule> modules = {}, const std::function<VkShaderModule(std::uint32_t)>& createModule = {}, bool shadersOnly = false);
+
+bool PipelineShaderLibrariesResident(VkDevice device, const PipelineLibraryKeys& keys, std::uint32_t viewMask);
 
 void WaitForOptimizedPipelines(VkDevice device);
 

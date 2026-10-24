@@ -10708,7 +10708,9 @@ void denormalClearTests(const Device& device, Recorder& recorder) {
 
 void pipelineLibraryTests(const Device& device) {
     std::lock_guard gpu(GpuMutex());
-    const auto& context = device.GetContext();
+    auto context = device.GetContext();
+    DescriptorCache descriptorCache(context);
+    context.descriptorCache = &descriptorCache;
     struct Cleanup {
         VkDevice device;
         ~Cleanup() { ClearCachedPipelines(device); }
@@ -10731,6 +10733,11 @@ void pipelineLibraryTests(const Device& device) {
     VertexInputLayout input;
     const auto lookup = [&] { return CachedPipeline(context, state, input, resources, shaders, VK_IMAGE_LAYOUT_GENERAL); };
     const auto counters = [&] { return PipelineLibraryCountersOf(context.device); };
+    if (context.graphicsPipelineLibrary) {
+        const auto layouts = DescribeSetLayouts(context, shaders);
+        Require(Pipeline::Prebuild(context, state, {}, layouts.View(), shaders, true), "draw shader library warmup was skipped");
+        Require(counters().built == std::array<std::uint64_t, 4>{0, 1, 1, 0} && counters().modules == 2, "draw shader warmup built interface libraries or missed shader libraries");
+    }
     const auto first = lookup();
     if (!context.graphicsPipelineLibrary) {
         Require(counters().linked == 0, "a pipeline was linked from libraries without VK_EXT_graphics_pipeline_library");

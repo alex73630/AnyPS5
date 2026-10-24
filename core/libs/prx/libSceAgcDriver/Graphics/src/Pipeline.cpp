@@ -308,6 +308,7 @@ void ValidateSampleMask(const Context& context, const State& state, std::span<co
 namespace {
 
 thread_local bool prebuilding = false;
+thread_local bool prebuildingShadersOnly = false;
 thread_local bool prebuilt = false;
 
 VkShaderStageFlags pushStagesOf(const Context& context) {
@@ -738,7 +739,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             return;
         }
         if (prebuilding) {
-            static_cast<void>(LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, true, _modules, createModule));
+            static_cast<void>(LinkPipelineFromLibraries(context, pipelineInfo, rendering, layoutInfo, keys, &optimized, true, _modules, createModule, prebuildingShadersOnly));
             for (const auto module : _modules) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
             _modules.clear();
             prebuilt = true;
@@ -771,12 +772,25 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
     }
 }
 
-bool Pipeline::Prebuild(const Context& context, const State& state, const VertexInputLayout& vertexInput, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders) {
+std::optional<bool> Pipeline::ShaderLibrariesResident(const Context& context, const State& state, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders) {
+    if (std::ranges::any_of(shaders, [](const CompiledShader& shader) { return !shader.program->stencilReferences.empty(); })) return std::nullopt;
+    PipelineLibraryKeys keys;
+    const char* fallback = nullptr;
+    if (!libraryKeys(keys, context, state, VertexInputLayout{}, resources, shaders, fallback)) return std::nullopt;
+    return PipelineShaderLibrariesResident(context.device, keys, 0);
+}
+
+bool Pipeline::Prebuild(const Context& context, const State& state, const VertexInputLayout& vertexInput, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders, bool shadersOnly) {
     if (std::ranges::any_of(shaders, [](const CompiledShader& shader) { return !shader.program->stencilReferences.empty(); })) return false;
+    if (shadersOnly) {
+        const auto resident = ShaderLibrariesResident(context, state, resources, shaders);
+        if (!resident.has_value()) return false;
+        if (*resident) return true;
+    }
     struct Scope {
-        Scope() { prebuilding = true; prebuilt = false; }
-        ~Scope() { prebuilding = false; }
-    } scope;
+        explicit Scope(bool shadersOnly) { prebuilding = true; prebuildingShadersOnly = shadersOnly; prebuilt = false; }
+        ~Scope() { prebuilding = false; prebuildingShadersOnly = false; }
+    } scope(shadersOnly);
     const Pipeline pipeline(context, state, vertexInput, resources, shaders);
     return prebuilt;
 }

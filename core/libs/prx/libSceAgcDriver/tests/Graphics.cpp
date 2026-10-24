@@ -8127,6 +8127,56 @@ void sampleOrderTests() {
 
 void pipelineLibrarySetTests() {
     using namespace AgcDriver::Graphics;
+    {
+        mock = MockVulkan{};
+        auto context = mockContext();
+        context.graphicsPipelineLibrary = true;
+        context.sampleRateShading = true;
+        context.limits.maxColorAttachments = 8;
+        State state{};
+        state.hasColorTarget = true;
+        state.color.format = VK_FORMAT_R8G8B8A8_UNORM;
+        state.colors.push_back(state.color);
+        state.blend.colorWriteMask = 15;
+        state.blends.push_back(state.blend);
+        ShaderRecompiler::RecompileResult vertex, fragment;
+        vertex.spirv = makeModule({});
+        fragment.spirv = makeModule({.fragment = true});
+        vertex.variantId = 1;
+        fragment.variantId = 2;
+        const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+        std::array<std::uint32_t, 1> key{11};
+        PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), VK_NULL_HANDLE, false, key, {}};
+        const auto warm = [&] { return Pipeline::Prebuild(context, state, {}, resources, shaders, true); };
+        for (std::uint32_t rejection = 0; rejection != 3; ++rejection) {
+            state.rectList = rejection == 0;
+            state.depthBiasPerFace = rejection == 1;
+            if (rejection == 2) fragment.stencilReferences.push_back(1);
+            Require(!Pipeline::ShaderLibrariesResident(context, state, resources, shaders).has_value() && !warm(), "unsupported draw shader warmup was accepted");
+            Require(mock.shaderModuleCreateCount == 0 && mock.live == 0, "unsupported draw shader warmup created Vulkan objects");
+        }
+        fragment.stencilReferences.clear();
+        Require(Pipeline::ShaderLibrariesResident(context, state, resources, shaders) == false, "unbuilt shader libraries were reported resident");
+        Require(warm(), "draw shader warmup was skipped");
+        Require(Pipeline::ShaderLibrariesResident(context, state, resources, shaders) == true, "warmed shader libraries were not resident");
+        const auto next = mock.next;
+        Require(warm() && mock.next == next, "resident shader warmup created Vulkan objects");
+        auto masked = state;
+        masked.blends.front().colorWriteMask = 0;
+        masked.colors.front().format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        VertexInputLayout input;
+        input.bindings.push_back({0, 16, VK_VERTEX_INPUT_RATE_VERTEX});
+        {
+            Pipeline pipeline(context, masked, input, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
+            const auto counters = PipelineLibraryCountersOf(context.device);
+            Require(counters.built == std::array<std::uint64_t, 4>{1, 1, 1, 1} && counters.linked == 1 && mock.shaderModuleCreateCount == 2, "masked draw did not reuse warmed shader libraries across interface changes");
+        }
+        state.perSampleShading = true;
+        Require(Pipeline::ShaderLibrariesResident(context, state, resources, shaders) == false && warm(), "per-sample draw incorrectly reused its fragment library");
+        Require(PipelineLibraryCountersOf(context.device).built == std::array<std::uint64_t, 4>{1, 1, 2, 1} && mock.shaderModuleCreateCount == 3, "per-sample warmup rebuilt an unaffected library");
+        ClearPipelineLibraries(context.device);
+        Require(mock.live == 0 && mock.shaderModules.empty(), "draw shader library tests leaked Vulkan objects");
+    }
     for (std::uint32_t scenario = 0; scenario < 8u; ++scenario) {
         const auto mask = scenario & 3u;
         const bool optimize = (scenario & 4u) != 0u;
@@ -8151,6 +8201,9 @@ void pipelineLibrarySetTests() {
         std::array<std::uint32_t, 1> mainKey{11}, fragmentKey{22};
         PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), makeHandle<VkDescriptorSetLayout>(), true, mainKey, fragmentKey};
         const auto prebuild = [&] { Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "graphics pipeline library prebuild was skipped"); };
+        Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders, true), "draw shader library prebuild was skipped");
+        Require(PipelineLibraryCountersOf(context.device).built == std::array<std::uint64_t, 4>{0, 1, 1, 0}, "draw shader prebuild created interface libraries or missed a shader library");
+        Require(mock.shaderModuleCreateCount == 2, "draw shader prebuild did not create exactly its two modules");
         prebuild();
         Require(mock.shaderModuleCreateCount == 2, "the first shader libraries did not create exactly their two modules");
         for (const auto& [part, flags] : mock.libraryCreateFlags) {
